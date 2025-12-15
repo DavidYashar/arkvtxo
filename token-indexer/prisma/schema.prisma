@@ -1,0 +1,159 @@
+// This is your Prisma schema file
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Token definitions
+model Token {
+  id          String   @id // Token ID (Bitcoin L1 TXID - proof)
+  name        String
+  symbol      String
+  totalSupply String   // Store as string to handle bigint
+  decimals    Int      @default(0)
+  creator     String   // Arkade address
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  createdInTx String   // Arkade VTXO ID (L2 tracking)
+  vtxoId      String?  // Arkade VTXO ID (optional for backward compat)
+  status      String   @default("confirmed") // pending | confirmed | failed
+  
+  // Bitcoin Layer 1 Proof (optional for backward compatibility)
+  bitcoinProof    String? // Bitcoin TXID (same as id for new tokens)
+  bitcoinAddress  String? // Bitcoin L1 address used
+  opReturnData    String? // Hex-encoded OP_RETURN data
+  bitcoinBlock    Int?    // Block height
+  confirmations   Int     @default(0)
+  
+  // Pre-sale fields
+  isPresale             Boolean @default(false)
+  presaleBatchAmount    String? // Tokens per batch (as string for bigint)
+  priceInSats           String? // Price per batch in satoshis (as string for bigint)
+  maxPurchasesPerWallet Int?    // Maximum batches per wallet
+  
+  balances         TokenBalance[]
+  transfers        TokenTransfer[]
+  purchases        PresalePurchase[]
+  purchaseRequests PurchaseRequest[]
+  
+  @@index([symbol])
+  @@index([creator])
+  @@index([bitcoinProof])
+  @@index([isPresale])
+  @@map("tokens")
+}
+
+// Token balances per address
+model TokenBalance {
+  id       String @id @default(cuid())
+  address  String
+  tokenId  String
+  balance  String // Store as string to handle bigint
+  
+  token    Token  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  
+  updatedAt DateTime @updatedAt
+  
+  @@unique([address, tokenId])
+  @@index([address])
+  @@index([tokenId])
+  @@map("token_balances")
+}
+
+// Token transfer history
+model TokenTransfer {
+  id          String   @id @default(cuid())
+  txid        String   // Bitcoin transaction ID
+  tokenId     String
+  fromAddress String
+  toAddress   String
+  amount      String   // Store as string to handle bigint
+  timestamp   DateTime @default(now())
+  blockHeight Int?
+  
+  token       Token    @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  
+  @@index([txid])
+  @@index([tokenId])
+  @@index([fromAddress])
+  @@index([toAddress])
+  @@index([timestamp])
+  @@map("token_transfers")
+}
+
+// VTXO tracking for double-spend prevention
+model VtxoUsage {
+  id          String   @id @default(cuid())
+  outpoint    String   @unique // txid:vout
+  tokenId     String
+  usedInTx    String   // Transaction ID where VTXO was used
+  usedAt      DateTime @default(now())
+  
+  @@index([tokenId])
+  @@map("vtxo_usage")
+}
+
+// Processed transactions (idempotency)
+model ProcessedTransaction {
+  txid        String   @id
+  processedAt DateTime @default(now())
+  success     Boolean
+  errorMsg    String?
+  
+  @@index([processedAt])
+  @@map("processed_transactions")
+}
+
+// Pre-sale purchases tracking
+model PresalePurchase {
+  id              String   @id @default(cuid())
+  tokenId         String
+  walletAddress   String   // Buyer's Arkade address
+  batchesPurchased Int     // Number of batches purchased
+  totalPaid       String   // Total sats paid (as string for bigint)
+  txid            String   // Bitcoin transaction ID of purchase
+  purchasedAt     DateTime @default(now())
+  
+  token           Token    @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  
+  @@index([tokenId])
+  @@index([walletAddress])
+  @@index([txid])
+  @@index([purchasedAt])
+  @@map("presale_purchases")
+}
+
+// Round-based purchase request queue
+model PurchaseRequest {
+  id                  String    @id @default(cuid())
+  tokenId             String
+  walletAddress       String    // Buyer's Arkade address
+  batchesPurchased    Int       // Number of batches requested
+  totalPaid           String    // Total sats to pay (amount calculated)
+  txid                String?   // VTXO transaction ID (null until payment sent)
+  timestamp           BigInt    // Millisecond precision for FCFS ordering
+  status              String    // 'pending', 'processing', 'confirmed', 'rejected'
+  paymentStatus       String    @default("pending") // 'pending', 'payment-requested', 'payment-sent', 'verified'
+  paymentRequestedAt  DateTime? // When server requested payment (for 30s timeout)
+  roundNumber         Int?      // Which round processed this request
+  rejectionReason     String?   // Reason if rejected (e.g., "Supply exhausted")
+  submittedAt         DateTime  @default(now())
+  processedAt         DateTime?
+  
+  token               Token     @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  
+  @@index([tokenId])
+  @@index([walletAddress])
+  @@index([status])
+  @@index([paymentStatus])
+  @@index([timestamp])
+  @@index([roundNumber])
+  @@index([tokenId, status])
+  @@index([tokenId, paymentStatus])
+  @@map("purchase_requests")
+}
