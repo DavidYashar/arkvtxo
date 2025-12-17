@@ -49,36 +49,57 @@ interface PoolWallet {
 }
 
 /**
- * Pool wallet addresses for controlled pre-sales (MAINNET)
+ * Load pool wallet addresses from Render Secret File
  * 
- * These 20 wallets are used in rotation to receive pre-sale payments.
- * When a wallet reaches the threshold (4000 sats), it rotates to the next one.
+ * Wallets are stored securely in Render Secret Files at:
+ * - Production: /etc/secrets/presale-wallets.json
+ * - Local dev: ./presale-wallets.json (gitignored)
  * 
- * Total capacity: 20 wallets × 4000 sats = 80,000 sats (0.0008 BTC)
- * Each wallet can handle ~2 purchases (2000 sats each) before rotation
+ * Each wallet should have format:
+ * { "address": "ark1...", "privateKey": "hex..." }
  */
-export const PRESALE_POOL_WALLETS: PoolWallet[] = [
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t4vlcs2jcpuumuww8yrd6zq0ppevee2zaaldhnwn88sma02g0rw23re7jf9', privateKey: 'ac31ec6efe48e8b7899e4f8d182ef885a45092313dc6ff921c7b9f52542de407', currentVolume: 0, isFull: false },
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t42ufznnec6pvl34za9uw2tl39cxchu296ty05gv99mujl5uwgyv6n74em6', privateKey: '39ba76fa86788933982476f1e9ff20b71c2bfb480f1522181742cc91a1b4ec8f', currentVolume: 0, isFull: false },
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t5rksk6an0n7u2tvws2dmy4gsvnej6jv09exv8ykccdwrrj2p7sedkuzy56', privateKey: '999d90063bcf6c0ee5faf5ab0dc717810a1a0731905d7d6987b16f6b97f71a36', currentVolume: 0, isFull: false },
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t56nnt7z54vfqu4cw7sv77ggkp7lcu0xtpelqrc2xnva70c3n28uxgsy0dw', privateKey: '59a6d655726f2bd7b34ac423da2db7314c8ab656121a8753b58e02b233679aaf', currentVolume: 0, isFull: false },
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t59f0tv3amtqd372tym6hksslz2whwumjwjmk2h5qy4g82t37354t8raa7u', privateKey: '32f49d5f309573a784bec8f07b0a9cc74fa431c8d4da185588263477c3dfecbf', currentVolume: 0, isFull: false },
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t54khgxhc23jnq3tlgh6nulkqm56k8qafvxjs9y70y38jat9vfl8xlgpghx', privateKey: 'a907aa66733cbe95ddb8f25bbf743b5c25738058a9ba7d646b5f18e6a5e749f8', currentVolume: 0, isFull: false },
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t4yct8nrkswdwjzhz9vvxzu3zdk2ulmzjhzstdylau8qpmz6ws2gepyd5ft', privateKey: '6c4bc68bb7bc59080c42678078343e4eeacccd5868e101b5f3a777e36b06bcbc', currentVolume: 0, isFull: false },
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t4tjf68e2ttql05gv0j9fw3aztvzktgemvdvnp3wsukfpefxmmeeq9g9zpe', privateKey: '45865583c60cd3d77920f2d7a99874a6e805e976bc667dc0aab2cc8a7af2d6cc', currentVolume: 0, isFull: false },
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t50vdcy7u9udwmd0cf34v0kyr5mw7pku0jpvn5ecg5xpjs8m0dxdll58m5f', privateKey: '3a4c895d84fd28e76610b95618200edefa2b89bf83b4e019299721265aada168', currentVolume: 0, isFull: false },
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t52762n5wzm5m8a53ugzdh2xgv44wrzy92cx9wn6zzh9ce78zjnq6ygtaun', privateKey: '37f404a3c550b3883d40312deb92d7e1f7cb95a5b89730b79bec6ad73ba8db6d', currentVolume: 0, isFull: false },
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t4zp63784vvyddu7u5zn338lepu2559rl2qrx4ksu223tywgs24maseyhg7', privateKey: '7476f01defb460f68fe8ca2952f04589400275d9cce08b78ea61b29929fb8be4', currentVolume: 0, isFull: false },
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t59v997ckuvvjvuyk3kpzug066wteclzps4hl4gqeyd28evmmuytukpt38g', privateKey: '3e82e226aa000d1c8fc7b75ffa97014ea61d0a3536d5b86a6576cecec541009e', currentVolume: 0, isFull: false },
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t4w44mdwhdqyc4a65pcykfkql83akvqp073jz4juf2x6qacnykxualjv2sm', privateKey: 'c5dcf82691cbfb02e703b5c42dacccc824aa38c6cc79b93f1617275edd6ddca6', currentVolume: 0, isFull: false },
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t5avchzrfwdu59ywq49w4ve97ggdyxlyfyf57x36lkmcqnv7jtc9k0ry8u0', privateKey: '7d828aeb7fcf00706d5a11376be6a6e2c7e4e2f5432e62a4a9a0a2cbd49c3ee9', currentVolume: 0, isFull: false },
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t4nknwuj74kqdmd47tzkl9ggufna6qk927ve6g4h99upcacltvlhsj8tnrf', privateKey: '6ddf6fb1d9683c0a2c1d2040bbaa64dd792982979e82939292fb8ef586e41f82', currentVolume: 0, isFull: false },
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t4kamd2dy8gudhw6cwjfypk74p7n2ct23g2d7533q3sgv7pm2xry7lulrnc', privateKey: '3fd7c80ce662ac698d7441e4f0fa29e3feff444dfbd784f297be0584f04875e4', currentVolume: 0, isFull: false },
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t5m26zruw4n6uuahmc9yw8knjp0t5fd6yvq0vj3msj6l32jxursvuq8t4tq', privateKey: 'a40dc5670a9805290b5bd48cc974c141d5b4acfe253dedbbbfb8e5a77bb2c763', currentVolume: 0, isFull: false },
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t4wsw8y7fclt39xsww239q0zlrz852zxncjztsqs65zgt9j42jk4xm80k35', privateKey: 'c16ace68e504d29047c10a58decd4ee2eb477522d59d9ad79983c2a0709a9cb0', currentVolume: 0, isFull: false },
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t43sqp4w8xnyks9gqyvud0x8pgt9dzgqu3ry9ldfezfrc940pm980ypyvsn', privateKey: 'bc51ccd1e11c051b56b24ed445fb6d4ef379264ea2d14c151f00bfed0f08bdf5', currentVolume: 0, isFull: false },
-  { address: 'ark1qq4hfssprtcgnjzf8qlw2f78yvjau5kldfugg29k34y7j96q2w4t5f9vy0zfshmycf39rqj5lv6yuvkj4gjtumsuvverg5f0z0rg82d2qjh07p', privateKey: '0eb51a0f273cb78b03391fdcce1504304029a80d896e32f380819f976b3fd59f', currentVolume: 0, isFull: false },
-];
+function loadPoolWallets(): PoolWallet[] {
+  const fs = require('fs');
+  const path = require('path');
+  
+  // Try Render Secret File location first (production)
+  const secretFilePath = '/etc/secrets/presale-wallets.json';
+  
+  // Try local file (development)
+  const localFilePath = path.join(__dirname, '../../presale-wallets.json');
+  
+  let walletsData: Array<{ address: string; privateKey: string }> = [];
+  
+  try {
+    if (fs.existsSync(secretFilePath)) {
+      console.log('📂 Loading pool wallets from Render Secret File');
+      walletsData = JSON.parse(fs.readFileSync(secretFilePath, 'utf8'));
+    } else if (fs.existsSync(localFilePath)) {
+      console.log('📂 Loading pool wallets from local file (development)');
+      walletsData = JSON.parse(fs.readFileSync(localFilePath, 'utf8'));
+    } else {
+      throw new Error('❌ Pool wallets file not found. Please configure presale-wallets.json in Render Secret Files or locally.');
+    }
+    
+    if (!Array.isArray(walletsData) || walletsData.length === 0) {
+      throw new Error('❌ Pool wallets file is empty or invalid format');
+    }
+    
+    console.log(`✅ Loaded ${walletsData.length} pool wallets`);
+    
+    return walletsData.map(w => ({
+      address: w.address,
+      privateKey: w.privateKey,
+      currentVolume: 0,
+      isFull: false,
+    }));
+  } catch (error: any) {
+    console.error('❌ Failed to load pool wallets:', error.message);
+    throw error;
+  }
+}
+
+export const PRESALE_POOL_WALLETS: PoolWallet[] = loadPoolWallets();
 
 // ============================================================================
 // ROTATION LOGIC
