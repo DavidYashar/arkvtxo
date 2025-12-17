@@ -60,8 +60,13 @@ function setupWebSocket(io: SocketIOServer) {
     }
 
     // Verify token
-    if (!token || token !== expectedToken) {
-      logger.warn({ socketId: socket.id }, '❌ Unauthorized WebSocket connection attempt');
+    if (!token) {
+      logger.warn({ socketId: socket.id }, '⚠️  WebSocket connection without auth token - allowing for now');
+      return next(); // Allow for now, will enforce later
+    }
+    
+    if (token !== expectedToken) {
+      logger.warn({ socketId: socket.id }, '❌ Unauthorized WebSocket connection attempt - invalid token');
       return next(new Error('Unauthorized - Invalid token'));
     }
 
@@ -131,6 +136,9 @@ export function createApiServer() {
 
   // Setup WebSocket connection handling
   setupWebSocket(io);
+
+  // Trust proxy - required for rate limiting behind Render's proxy
+  app.set('trust proxy', 1);
 
   // Security middleware
   app.use(helmet({
