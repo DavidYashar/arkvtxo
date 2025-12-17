@@ -48,8 +48,29 @@ export function getIO(): SocketIOServer | null {
  * Setup WebSocket connection handling
  */
 function setupWebSocket(io: SocketIOServer) {
+  // WebSocket Authentication Middleware
+  io.use((socket, next) => {
+    const token = socket.handshake.auth.token;
+    const expectedToken = process.env.WS_AUTH_TOKEN || process.env.API_KEY;
+
+    // If no auth token configured, allow (backward compatibility)
+    if (!expectedToken) {
+      logger.warn('⚠️  WS_AUTH_TOKEN not configured - WebSocket authentication disabled');
+      return next();
+    }
+
+    // Verify token
+    if (!token || token !== expectedToken) {
+      logger.warn({ socketId: socket.id }, '❌ Unauthorized WebSocket connection attempt');
+      return next(new Error('Unauthorized - Invalid token'));
+    }
+
+    logger.info({ socketId: socket.id }, '✅ WebSocket authenticated');
+    next();
+  });
+
   io.on('connection', (socket) => {
-    logger.info({ socketId: socket.id }, ' WebSocket client connected');
+    logger.info({ socketId: socket.id }, '🔌 WebSocket client connected');
 
     // Join wallet room (for personal notifications)
     socket.on('join-wallet', (walletAddress: string) => {
@@ -148,10 +169,37 @@ export function createApiServer() {
   // Body parsing with size limit
   app.use(express.json({ limit: '10kb' }));
 
+  // API Key Authentication Middleware
+  const apiKeyAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    // Skip auth for health check
+    if (req.path === '/health') {
+      return next();
+    }
+
+    const apiKey = req.headers['x-api-key'] as string;
+    const expectedKey = process.env.API_KEY;
+
+    // If API_KEY not configured, allow (backward compatibility)
+    if (!expectedKey) {
+      logger.warn('⚠️  API_KEY not configured - authentication disabled');
+      return next();
+    }
+
+    if (!apiKey || apiKey !== expectedKey) {
+      logger.warn({ path: req.path, ip: req.ip }, 'Unauthorized API access attempt');
+      return res.status(401).json({ error: 'Unauthorized - Invalid API key' });
+    }
+
+    next();
+  };
+
+  // Apply API key auth to all /api routes
+  app.use('/api', apiKeyAuth);
+
   // Mount verification router
   app.use('/api', verifyTokenRouter);
 
-  // Health check
+  // Health check (public)
   app.get('/health', (req, res) => {
     res.json({ status: 'ok' });
   });
