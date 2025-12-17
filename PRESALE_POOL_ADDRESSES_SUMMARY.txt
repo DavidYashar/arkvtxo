@@ -1,0 +1,92 @@
+===============================================
+PRESALE POOL ROTATION - ADDRESS SUMMARY
+===============================================
+Created: December 4, 2025
+Total Wallets: 20
+Threshold: 20,000 sats per wallet
+Status: ✅ CONFIGURED
+===============================================
+
+All 20 Arkade addresses have been successfully derived
+and added to: token-indexer/src/config/presale-pool.ts
+
+Full wallet credentials (mnemonic + private key) are
+stored securely in: PRESALE_POOL_WALLETS.txt
+
+===============================================
+ARKADE ADDRESSES (for quick reference):
+===============================================
+
+Wallet 01: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2nmv32ss0ytqqy0jnyr3ll2hh2mu7txgtnkmm3rcjzalnmex8w2q8tq0x5eu
+
+Wallet 02: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2nmcvrr26pz3pq2633jqgf3hx9u3h7h24u69lp600jq9yemf740gyy90v98p
+
+Wallet 03: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2nmwh3kghrpkk9zha73vahtjhahlv4sackx4wydn78gsmrhk0a2ec0z7eqvr
+
+Wallet 04: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2nmdapc99phv6kxdelt5ty789nkqm5r2rxxvlh9wgumc9y2lu7mfh492jxuj
+
+Wallet 05: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2n6rckk2x620phx3sx8mtj2zxcteefdqmwwumh3dnscy9z52ulppuy9tllzq
+
+Wallet 06: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2nm2zpn6t3xcd4kvqvpcpe26r4amm37nhcsekah5h4kaagjap3dr7hnlc4dq
+
+Wallet 07: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2nmawa9y0y8qrjfews3dcdf57gr53dd5ph24lefgrdjj0rl23uv07ma950av
+
+Wallet 08: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2nmrmthfyw8etgv9hxnsyaaa4kfgmuxduyw3fjft4fpaqvw9lusp4rg5fry0
+
+Wallet 09: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2nm90uxgr8n6w5nj00zx4e0typ4nzhklxxpx0p0kv2ayxdgem84fga8tdw76
+
+Wallet 10: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2n6xw5uk5uu0e7xl3d577gl2fnhw29d4vk3zfsqxhgldajxk37mplen24lag
+
+Wallet 11: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2n654y4dr7ayv8q46zf3njzrucrrcn293h0hdr03mzzn5t4g8skcpjj4ezh4w
+
+Wallet 12: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2n6jzvdpv797e4uwwwpkfcn2z3ry5rszfd0qfe7wjrjppszl4uxym8v9ey3j
+
+Wallet 13: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2nmrvad7ahuewxckh30gwud3fhkpfg7ft0ke2tzpenq0sr9ka487eg8krvj8
+
+Wallet 14: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2n64z7ugcpsj05c7tycckjme25p28kr6wx3scymjzfxqrqp4ttm7qkf4cxuc
+
+Wallet 15: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2nmnahpe7cz47096dudtaekjpe06cpur27p3yck06zxm5gyjp6x758aggtsr
+
+Wallet 16: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2n6wmrs5kz6sz7w9u8xg9d6vkwd02dujqmhqxrxmz58llzz5sqs7rra7sgjx
+
+Wallet 17: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2nmxu43jj09kkt8rtgz02ym2u3yxucqdkjyt0hph9rw7fzexlvk5zan47234
+
+Wallet 18: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2n6663ddaxf9y750uhnzgq49ay7lzevqcg7qgzd8h37xcym3txymkdmrlc8j
+
+Wallet 19: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2n6uwa3fgdrwpalhx9a265qd4m966966vk7pzkaxlc5v8q6s355ukfwg8dz8
+
+Wallet 20: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2n6zjyn5ejf4dqpxuwfpukzx4l5xmekecmp908tts7qyyx0apz8mces5wgsm
+
+===============================================
+HOW THE ROTATION WORKS:
+===============================================
+
+1. When a pre-sale token is created, the system assigns
+   the wallet with the lowest current volume that isn't full
+
+2. Each purchase adds to that wallet's volume counter
+
+3. When a wallet reaches 20,000 sats, it's marked as "full"
+   and the next wallet in rotation is used
+
+4. You can monitor wallet status via:
+   GET http://localhost:3002/api/presale/pool-stats
+
+5. To reset or adjust, edit:
+   token-indexer/src/config/presale-pool.ts
+
+===============================================
+CONFIGURATION:
+===============================================
+
+File: token-indexer/src/config/presale-pool.ts
+
+enabled: true (Pool rotation active)
+WALLET_THRESHOLD_SATS: 20000
+
+To disable rotation and use creator addresses:
+Set enabled = false in the config file
+
+===============================================
+END OF SUMMARY
+===============================================

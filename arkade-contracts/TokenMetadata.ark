@@ -1,0 +1,82 @@
+/**
+ * Token Metadata Contract for Arkade
+ * 
+ * This contract represents the initial token issuance and metadata.
+ * It's a one-time use contract that establishes the token and mints initial supply.
+ * 
+ * Flow:
+ * 1. Creator deploys this contract with token details
+ * 2. Contract mints initial supply to creator
+ * 3. Initial supply becomes FungibleToken VTXOs
+ * 4. Metadata contract is consumed (one-time use)
+ */
+
+options {
+  server = server;
+  exit = 144;
+}
+
+/**
+ * Token Metadata and Issuance Contract
+ * 
+ * @param name - Token name (e.g., "My Token")
+ * @param symbol - Token symbol (e.g., "MTK")
+ * @param decimals - Decimal places (e.g., 8)
+ * @param totalSupply - Total supply to mint
+ * @param creator - Token creator's public key
+ */
+contract TokenMetadata(
+  bytes name,
+  bytes symbol,
+  int decimals,
+  int totalSupply,
+  pubkey creator
+) {
+  
+  /**
+   * Mint initial token supply
+   * 
+   * Creates the token ID and mints all tokens to creator.
+   * Token ID is derived from creator + name + symbol for uniqueness.
+   * 
+   * @param creatorSig - Creator's signature
+   */
+  function mint(signature creatorSig) {
+    // Verify creator signature
+    require(checkSig(creatorSig, creator), "Invalid creator signature");
+    
+    // Validate token parameters
+    require(totalSupply > 0, "Total supply must be positive");
+    require(decimals >= 0 && decimals <= 18, "Decimals must be 0-18");
+    require(name.length > 0 && name.length <= 32, "Invalid name length");
+    require(symbol.length > 0 && symbol.length <= 10, "Invalid symbol length");
+    
+    // Generate unique token ID
+    bytes32 tokenId = sha256(creator + name + symbol + int2bytes(tx.time));
+    
+    // Verify output is FungibleToken with full supply to creator
+    bytes32 initialTokenScript = generateTokenScript(tokenId, totalSupply, creator, decimals);
+    require(
+      tx.outputs[0].scriptPubKey == initialTokenScript,
+      "Output must be initial token supply to creator"
+    );
+    
+    // Store metadata in witness for indexer to parse
+    // This allows indexers to associate tokenId with human-readable metadata
+    // (Implementation detail: metadata would be in witness data)
+  }
+  
+  /**
+   * Helper: Generate token script
+   */
+  function generateTokenScript(
+    bytes32 tid,
+    int amt,
+    pubkey own,
+    int dec
+  ) internal returns (bytes32) {
+    bytes stateCommitment = sha256(tid + int2bytes(amt) + own + int2bytes(dec));
+    pubkey tweakedKey = tweakKey(own, stateCommitment);
+    return new P2TR(tweakedKey);
+  }
+}

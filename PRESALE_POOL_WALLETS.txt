@@ -1,0 +1,97 @@
+===============================================
+PRESALE POOL ROTATION WALLETS
+===============================================
+Created: December 4, 2025
+Purpose: 20 wallets for pre-sale payment rotation
+Threshold: 20,000 sats per wallet
+===============================================
+
+⚠️ CRITICAL: Keep this file secure and backed up!
+These wallets hold pre-sale funds.
+
+===============================================
+
+Wallet 1:
+Mnemonic: powder island venture turtle example together true outdoor deal tone fortune few
+Private Key: bbab99c155cebbdec4158221a49fbdb316f25cdc13e82df24e7cceecb48aff97
+Arkade Address: tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2nmv32ss0ytqqy0jnyr3ll2hh2mu7txgtnkmm3rcjzalnmex8w2q8tq0x5eu
+
+Wallet 2:
+Mnemonic: volume satisfy runway symptom stem twin keen shock spawn like duck crumble
+Private Key: 4f468dbd03c49f5ab3113c5b5a398d2511a8b017fc4a6478e352f83f9b3bcca4
+
+Wallet 3:
+Mnemonic: label lyrics top unlock forward unveil panic bulk comic switch fan steak
+Private Key: 91787d45fead1c163927d3313dab95f1b7589622e3a5950729845bcfa723b215
+
+Wallet 4:
+Mnemonic: spin step animal bone please pluck leave cargo saddle pole kind ivory
+Private Key: a24b2402fa022fd874695ff872835f4e91091023551b8ffd197585bb496f08df
+
+Wallet 5:
+Mnemonic: lady measure solution ribbon leg boil blouse consider dinner bench device edge
+Private Key: 0409486f09d266109c608d20bfbb248c5f158ba0864c734aa17c8d3a3680c5e7
+
+Wallet 6:
+Mnemonic: alert stomach spin useless heavy gorilla noble okay jeans stereo family wise
+Private Key: d45693abc1906988dbb1cecfb1583217dd185dcac95e12d9ee2431b4b42c1e3f
+
+Wallet 7:
+Mnemonic: orchard library deal rice chapter news derive stove knife minor echo mass
+Private Key: c69d8fa5415bd97ab5605221c8e1b98e854cc41d8feddb7605ea9452a2847c2c
+
+Wallet 8:
+Mnemonic: strategy wish strong barely enhance naive jelly media island ring prefer kid
+Private Key: 91852558d00c66b501cccc840e29ce9d0e4d2e0d4f2a5f914e98c41a830d9854
+
+Wallet 9:
+Mnemonic: young apple enable armor almost sauce around wait panel certain beef reunion
+Private Key: 28ac30e04a625d56eedd1622e8d96141b2a85506ac607c9cf4e2d29f00bf4b70
+
+Wallet 10:
+Mnemonic: manage clean lab dice electric various arrow bracket yard occur leopard shy
+Private Key: 42bd9203e7e87d5b56ffcce31afcea9fbcd065c8b3090595233ee080f229d898
+
+Wallet 11:
+Mnemonic: deny involve crunch leopard mother vessel flush unlock hurry bulb undo sustain
+Private Key: 1ca3c3cd10c4689934ef31006a62d7651dd9215eb7ae09e5b59534e22683e83c
+
+Wallet 12:
+Mnemonic: canyon radar reject bless scare kingdom pilot neglect deny benefit digital weird
+Private Key: 9cc218f8d01abc2a9816de72441204d75eba7ee58a9610807d0e5a02a32f1425
+
+Wallet 13:
+Mnemonic: couch cage issue radar journey absurd typical soccer nothing negative fox unable
+Private Key: 0fbc29e36476148f0e6e8b6e3dbf2893bf15512defa376e5637b1e7e6537861c
+
+Wallet 14:
+Mnemonic: mask charge quarter lazy use core maid blame sound loop subject birth
+Private Key: 76f325e7b8fc74d2651fa7a221a65e444c8a0c049b8af558edca32b1d7d987e7
+
+Wallet 15:
+Mnemonic: swap simple female nest use film tube split ship exotic feature drum
+Private Key: ee63e8a9794d41f0dbb80bf8cfe5688804ac4d571912117c4f7de8215a341227
+
+Wallet 16:
+Mnemonic: exile auction banner clown chief angry twin book program column into gesture
+Private Key: f8f73d2a96eb1419af0d81355c5e78d65ed0aa04b3780a2af946c2890be23df8
+
+Wallet 17:
+Mnemonic: police rude like topic island ridge noodle broken tissue clog video lunch
+Private Key: abad72428f57c719eb4ce3b6dc065ff513c82eef954e98f0258f30f756c31017
+
+Wallet 18:
+Mnemonic: bottom naive excite disagree cream one upon awesome honey rough rabbit maple
+Private Key: d8a9c28043f08a2b739ae1d089c9a6c8c8f365fb8818060be2b97f1b0bc82840
+
+Wallet 19:
+Mnemonic: refuse unfair oblige pipe music jealous model where coach erupt corn trim
+Private Key: 8ac153c0f44fd90748fc7f99291334c1974ed44747a64c6aa0828a53a645a6c2
+
+Wallet 20:
+Mnemonic: roof ginger august online type simple wrong prize weasel arm tower unaware
+Private Key: 3297fb61b64f75c7672cc5b618b4fa589bbb66ed4270bae240048f4e8f28d58c
+
+===============================================
+END OF WALLET LIST
+===============================================

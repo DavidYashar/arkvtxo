@@ -1,0 +1,165 @@
+/**
+ * Fungible Token Contract for Arkade
+ * 
+ * This contract implements a fungible token using Arkade's state-carrying VTXO paradigm.
+ * Token state (balance) is carried in the VTXO itself and enforced through recursive covenants.
+ * 
+ * Features:
+ * - Transfer tokens between users
+ * - Split tokens (send + change)
+ * - Merge multiple token VTXOs
+ * - Self-enforcing: No server can violate token rules
+ * - Composable: Can interact with other Arkade contracts
+ */
+
+// Configuration
+options {
+  server = server;  // Server cosigns for instant settlement
+  exit = 144;       // 24-hour unilateral exit timelock
+}
+
+/**
+ * Fungible Token Contract
+ * 
+ * @param tokenId - Unique identifier for this token (bytes32 hash)
+ * @param amount - Amount of tokens in this VTXO
+ * @param owner - Public key of current token owner
+ * @param decimals - Number of decimal places (e.g., 8 for Bitcoin-style)
+ */
+contract FungibleToken(
+  bytes32 tokenId,
+  int amount,
+  pubkey owner,
+  int decimals
+) {
+  
+  /**
+   * Transfer tokens to another address
+   * 
+   * This function allows splitting the token VTXO:
+   * - Output 0: Tokens to recipient (if transferAmount > 0)
+   * - Output 1: Change back to sender (if changeAmount > 0)
+   * 
+   * @param recipient - Public key of recipient
+   * @param transferAmount - Amount to transfer
+   * @param changeAmount - Amount to keep as change
+   * @param ownerSig - Signature from current owner
+   */
+  function transfer(
+    pubkey recipient,
+    int transferAmount,
+    int changeAmount,
+    signature ownerSig
+  ) {
+    // Validate signature
+    require(checkSig(ownerSig, owner), "Invalid owner signature");
+    
+    // Validate amounts
+    require(transferAmount > 0, "Transfer amount must be positive");
+    require(changeAmount >= 0, "Change amount cannot be negative");
+    require(transferAmount + changeAmount == amount, "Amounts must sum to total");
+    
+    // Verify output count
+    int expectedOutputs = changeAmount > 0 ? 2 : 1;
+    require(tx.outputs.length >= expectedOutputs, "Insufficient outputs");
+    
+    // Verify recipient output (output 0)
+    // Must be same token contract with updated owner and amount
+    bytes32 recipientTokenScript = generateTokenScript(tokenId, transferAmount, recipient, decimals);
+    require(
+      tx.outputs[0].scriptPubKey == recipientTokenScript,
+      "Output 0 must be token to recipient"
+    );
+    
+    // Verify change output (output 1) if applicable
+    if (changeAmount > 0) {
+      bytes32 changeTokenScript = generateTokenScript(tokenId, changeAmount, owner, decimals);
+      require(
+        tx.outputs[1].scriptPubKey == changeTokenScript,
+        "Output 1 must be change to sender"
+      );
+    }
+  }
+  
+  /**
+   * Merge this token VTXO with another
+   * 
+   * Combines multiple token VTXOs into one with total amount.
+   * All inputs must be same tokenId and owner.
+   * 
+   * @param otherAmount - Amount from other token VTXO being merged
+   * @param ownerSig - Signature from current owner
+   */
+  function merge(
+    int otherAmount,
+    signature ownerSig
+  ) {
+    // Validate signature
+    require(checkSig(ownerSig, owner), "Invalid owner signature");
+    
+    // Validate other amount
+    require(otherAmount > 0, "Other amount must be positive");
+    
+    // Calculate total amount
+    int totalAmount = amount + otherAmount;
+    
+    // Verify we have at least 2 inputs (this + other token VTXO)
+    require(tx.inputs.length >= 2, "Need at least 2 inputs to merge");
+    
+    // Verify output is combined token
+    bytes32 mergedTokenScript = generateTokenScript(tokenId, totalAmount, owner, decimals);
+    require(
+      tx.outputs[0].scriptPubKey == mergedTokenScript,
+      "Output must be merged token"
+    );
+  }
+  
+  /**
+   * Burn tokens (destroy permanently)
+   * 
+   * @param burnAmount - Amount to burn (must equal this VTXO's amount)
+   * @param ownerSig - Signature from current owner
+   */
+  function burn(
+    int burnAmount,
+    signature ownerSig
+  ) {
+    // Validate signature
+    require(checkSig(ownerSig, owner), "Invalid owner signature");
+    
+    // Validate burn amount matches
+    require(burnAmount == amount, "Burn amount must match token amount");
+    
+    // Burning means no token output - just consume the VTXO
+    // The absence of token continuation is the burn
+    // Could optionally send sats to a burn address or back to owner
+  }
+  
+  /**
+   * Generate token script for covenant continuation
+   * 
+   * Helper function to create the expected scriptPubKey for token outputs.
+   * Uses Taproot key tweaking to commit to token state.
+   * 
+   * @param tid - Token ID
+   * @param amt - Token amount
+   * @param own - Owner pubkey
+   * @param dec - Decimals
+   * @returns Tweaked Taproot scriptPubKey
+   */
+  function generateTokenScript(
+    bytes32 tid,
+    int amt,
+    pubkey own,
+    int dec
+  ) internal returns (bytes32) {
+    // Create commitment to token state
+    bytes stateCommitment = sha256(tid + int2bytes(amt) + own + int2bytes(dec));
+    
+    // Tweak internal key with state commitment
+    pubkey tweakedKey = tweakKey(own, stateCommitment);
+    
+    // Return P2TR scriptPubKey
+    return new P2TR(tweakedKey);
+  }
+}

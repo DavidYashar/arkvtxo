@@ -4,6 +4,9 @@
 
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import { body, validationResult } from 'express-validator';
 import { createServer } from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import { PrismaClient } from '@prisma/client';
@@ -108,8 +111,42 @@ export function createApiServer() {
   // Setup WebSocket connection handling
   setupWebSocket(io);
 
-  app.use(cors());
-  app.use(express.json());
+  // Security middleware
+  app.use(helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        connectSrc: ["'self'", process.env.WALLET_UI_URL || 'https://www.arkvtxo.com'],
+      },
+    },
+  }));
+
+  // CORS - restrict to production domain only
+  app.use(cors({
+    origin: process.env.WALLET_UI_URL || 'https://www.arkvtxo.com',
+    credentials: true,
+    methods: ['GET', 'POST']
+  }));
+
+  // Rate limiting - prevent abuse
+  const apiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, // limit each IP to 100 requests per windowMs
+    message: 'Too many requests from this IP, please try again later.',
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+  app.use('/api/', apiLimiter);
+
+  // Stricter rate limit for token creation
+  const tokenCreationLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 hour
+    max: 10, // limit each IP to 10 token creations per hour
+    message: 'Too many token creation attempts, please try again later.',
+  });
+
+  // Body parsing with size limit
+  app.use(express.json({ limit: '10kb' }));
 
   // Mount verification router
   app.use('/api', verifyTokenRouter);
@@ -282,26 +319,43 @@ export function createApiServer() {
 
   // Register new token (called by wallet after creation)
   // Now with Bitcoin L1 proof support
-  app.post('/api/tokens', async (req, res) => {
-    try {
-      const { 
-        tokenId, 
-        name, 
-        symbol, 
-        totalSupply, 
-        decimals, 
-        creator, 
-        vtxoId,
-        status,            // pending | confirmed | failed
-        bitcoinProof,      // Bitcoin L1 TXID
-        bitcoinAddress,    // Bitcoin L1 address
-        opReturnData,      // Hex-encoded OP_RETURN data
-        confirmations,     // Number of Bitcoin confirmations
-        isPresale,         // Is presale token
-        presaleBatchAmount,
-        priceInSats,
-        maxPurchasesPerWallet
-      } = req.body;
+  app.post('/api/tokens',
+    tokenCreationLimiter, // Apply stricter rate limit
+    [
+      body('tokenId').isString().trim().notEmpty().isLength({ max: 100 }),
+      body('name').isString().trim().notEmpty().isLength({ max: 100 }),
+      body('symbol').isString().trim().notEmpty().isLength({ max: 20 }),
+      body('totalSupply').isString().matches(/^\d+$/),
+      body('decimals').optional().isInt({ min: 0, max: 18 }),
+      body('creator').isString().matches(/^[a-km-zA-HJ-NP-Z1-9]{25,90}$/),
+      body('bitcoinAddress').optional().isString(),
+    ],
+    async (req: express.Request, res: express.Response) => {
+      // Validate request
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
+      }
+
+      try {
+        const { 
+          tokenId, 
+          name, 
+          symbol, 
+          totalSupply, 
+          decimals, 
+          creator, 
+          vtxoId,
+          status,            // pending | confirmed | failed
+          bitcoinProof,      // Bitcoin L1 TXID
+          bitcoinAddress,    // Bitcoin L1 address
+          opReturnData,      // Hex-encoded OP_RETURN data
+          confirmations,     // Number of Bitcoin confirmations
+          isPresale,         // Is presale token
+          presaleBatchAmount,
+          priceInSats,
+          maxPurchasesPerWallet
+        } = req.body;
 
       // Validate required fields (vtxoId optional for pending tokens)
       if (!tokenId || !name || !symbol || !totalSupply || !creator) {
@@ -490,14 +544,23 @@ export function createApiServer() {
   });
 
   // Register token transfer (called by wallet after transfer)
-  app.post('/api/transfers', async (req, res) => {
-    try {
-      const { tokenId, fromAddress, toAddress, amount, vtxoId } = req.body;
-
-      // Validate required fields
-      if (!tokenId || !fromAddress || !toAddress || !amount || !vtxoId) {
-        return res.status(400).json({ error: 'Missing required fields' });
+  app.post('/api/transfers',
+    [
+      body('tokenId').isString().trim().notEmpty(),
+      body('fromAddress').isString().matches(/^[a-km-zA-HJ-NP-Z1-9]{25,90}$/),
+      body('toAddress').isString().matches(/^[a-km-zA-HJ-NP-Z1-9]{25,90}$/),
+      body('amount').isString().matches(/^\d+$/),
+      body('vtxoId').isString().trim().notEmpty(),
+    ],
+    async (req: express.Request, res: express.Response) => {
+      // Validate request
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
       }
+
+      try {
+        const { tokenId, fromAddress, toAddress, amount, vtxoId } = req.body;
 
       // VERIFY VTXO with Arkade ASP before accepting transfer
       // Note: VTXO verification with ASP is optional
@@ -981,13 +1044,23 @@ export function createApiServer() {
     }
   });
 
-  app.post('/api/presale/purchase', async (req, res) => {
-    try {
-      const { tokenId, walletAddress, batchesPurchased, totalPaid, txid } = req.body;
-
-      if (!tokenId || !walletAddress || !batchesPurchased || !totalPaid || !txid) {
-        return res.status(400).json({ error: 'Missing required fields' });
+  app.post('/api/presale/purchase',
+    [
+      body('tokenId').isString().trim().notEmpty(),
+      body('walletAddress').isString().matches(/^[a-km-zA-HJ-NP-Z1-9]{25,90}$/),
+      body('batchesPurchased').isInt({ min: 1, max: 1000 }),
+      body('totalPaid').isString().matches(/^\d+$/),
+      body('txid').isString().trim().notEmpty(),
+    ],
+    async (req: express.Request, res: express.Response) => {
+      // Validate request
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
       }
+
+      try {
+        const { tokenId, walletAddress, batchesPurchased, totalPaid, txid } = req.body;
 
       const token = await prisma.token.findUnique({
         where: { id: tokenId },
