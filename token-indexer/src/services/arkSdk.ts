@@ -20,6 +20,11 @@ export async function queryVtxosViaSdk(privateKeyHex: string) {
     // Get VTXOs using SDK
     const vtxos = await wallet.getVtxos();
     
+    console.log(`📦 VTXOs count: ${vtxos.length}`);
+    vtxos.forEach((v, i) => {
+      console.log(`  VTXO #${i + 1}: ${v.value} sats, state: ${v.virtualStatus?.state}, spent: ${v.isSpent}`);
+    });
+    
     return {
       success: true,
       vtxos: vtxos.map(v => ({
@@ -61,9 +66,14 @@ export async function queryBalanceViaSdk(privateKeyHex: string) {
 
     const balance = await wallet.getBalance();
     
+    console.log('📊 Full balance response from SDK:', JSON.stringify(balance, null, 2));
+    
     return {
       success: true,
       available: balance.available || 0,
+      preconfirmed: balance.preconfirmed || 0,
+      settled: balance.settled || 0,
+      recoverable: balance.recoverable || 0,
       boarding: balance.boarding?.total || 0,
       total: balance.total || 0,
       balanceDetails: balance,
