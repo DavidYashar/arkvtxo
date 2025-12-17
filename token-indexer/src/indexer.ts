@@ -50,7 +50,7 @@ export class TokenIndexer {
         // This is a placeholder - actual implementation depends on Arkade indexer API
         
         // Skip if no Arkade indexer URL configured
-        if (!this.arkadeIndexerUrl || this.arkadeIndexerUrl === 'http://localhost:7070') {
+        if (!this.arkadeIndexerUrl || this.arkadeIndexerUrl.includes('localhost')) {
           logger.warn('Arkade indexer URL not configured or using default. Waiting...');
           await this.sleep(30000); // Wait 30 seconds
           continue;
