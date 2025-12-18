@@ -10,8 +10,14 @@ import {
 } from './types';
 
 export class TokenProvider implements ITokenProvider {
-  constructor(private readonly baseUrl: string) {
+  constructor(
+    private readonly baseUrl: string,
+    private readonly apiKey?: string
+  ) {
     console.log('🔧 TokenProvider initialized with baseUrl:', baseUrl);
+    if (apiKey) {
+      console.log('🔑 API Key configured for authentication');
+    }
   }
 
   async getToken(tokenId: string): Promise<TokenMetadata> {
@@ -150,11 +156,17 @@ export class TokenProvider implements ITokenProvider {
     console.log('  Params:', params);
     
     try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      
+      if (this.apiKey) {
+        headers['x-api-key'] = this.apiKey;
+      }
+      
       const response = await fetch(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify(params),
       });
 
