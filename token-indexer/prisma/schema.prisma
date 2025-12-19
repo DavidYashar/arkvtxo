@@ -17,6 +17,7 @@ model Token {
   totalSupply String   // Store as string to handle bigint
   decimals    Int      @default(0)
   creator     String   // Arkade address
+  issuer      String   @default("") // Original creator/issuer (wallet that created the token)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   createdInTx String   // Arkade VTXO ID (L2 tracking)
@@ -43,6 +44,7 @@ model Token {
   
   @@index([symbol])
   @@index([creator])
+  @@index([issuer])
   @@index([bitcoinProof])
   @@index([isPresale])
   @@map("tokens")

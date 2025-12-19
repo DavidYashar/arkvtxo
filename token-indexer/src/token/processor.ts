@@ -26,6 +26,7 @@ export async function processTokenCreate(
       totalSupply: tokenOp.amount.toString(),
       decimals: parsed.decimals,
       creator,
+      issuer: creator,
       createdInTx: tx.txid || tx.id,
     },
   });

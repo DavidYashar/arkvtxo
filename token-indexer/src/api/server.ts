@@ -31,6 +31,15 @@ import {
 } from '../config/presale-pool';
 
 const prisma = new PrismaClient();
+function isValidArkadeAddress(address: string): boolean {
+  // Accept Arkade bech32-style addresses (mainnet ark1..., testnet tark1...)
+  // and keep backward compatibility with older/base58-like formats.
+  const a = (address || '').trim();
+  if (!a) return false;
+  const bech32Arkade = /^(t?ark1)[0-9a-z]{20,120}$/;
+  const legacy = /^[a-km-zA-HJ-NP-Z1-9]{25,90}$/;
+  return bech32Arkade.test(a) || legacy.test(a);
+}
 
 // Initialize Arkade client for VTXO verification
 const arkadeClient = new ArkadeClient(
@@ -51,26 +60,51 @@ function setupWebSocket(io: SocketIOServer) {
   // WebSocket Authentication Middleware
   io.use((socket, next) => {
     const token = socket.handshake.auth.token;
-    const expectedToken = process.env.WS_AUTH_TOKEN || process.env.API_KEY;
+    const expectedToken = process.env.API_KEY;
 
-    // If no auth token configured, allow (backward compatibility)
+    // If no API_KEY configured, allow (backward compatibility / local dev)
     if (!expectedToken) {
-      logger.warn('⚠️  WS_AUTH_TOKEN not configured - WebSocket authentication disabled');
+      logger.warn('⚠️  API_KEY not configured - WebSocket authentication disabled');
       return next();
     }
 
     // Verify token
     if (!token) {
-      logger.warn({ socketId: socket.id }, '⚠️  WebSocket connection without auth token - allowing for now');
-      return next(); // Allow for now, will enforce later
+      logger.warn(
+        {
+          socketId: socket.id,
+          origin: socket.handshake.headers?.origin,
+          hasToken: false,
+          expectedTokenLength: expectedToken.length,
+        },
+        '❌ WebSocket connection without auth token'
+      );
+      return next(new Error('Unauthorized - Missing token'));
     }
-    
+
     if (token !== expectedToken) {
-      logger.warn({ socketId: socket.id }, '❌ Unauthorized WebSocket connection attempt - invalid token');
+      logger.warn(
+        {
+          socketId: socket.id,
+          hasToken: !!token,
+          tokenLength: token.length,
+          expectedTokenLength: expectedToken.length,
+          origin: socket.handshake.headers?.origin,
+        },
+        '❌ Unauthorized WebSocket connection attempt - invalid token'
+      );
       return next(new Error('Unauthorized - Invalid token'));
     }
 
-    logger.info({ socketId: socket.id }, '✅ WebSocket authenticated');
+    logger.info(
+      {
+        socketId: socket.id,
+        origin: socket.handshake.headers?.origin,
+        tokenLength: token.length,
+        expectedTokenLength: expectedToken.length,
+      },
+      '✅ WebSocket authenticated'
+    );
     next();
   });
 
@@ -383,7 +417,7 @@ export function createApiServer() {
       body('symbol').isString().trim().notEmpty().isLength({ max: 20 }),
       body('totalSupply').isString().matches(/^\d+$/),
       body('decimals').optional().isInt({ min: 0, max: 18 }),
-      body('creator').isString().matches(/^[a-km-zA-HJ-NP-Z1-9]{25,90}$/),
+      body('creator').isString().custom((value) => isValidArkadeAddress(value)),
       body('bitcoinAddress').optional().isString(),
     ],
     async (req: express.Request, res: express.Response) => {
@@ -531,6 +565,7 @@ export function createApiServer() {
             totalSupply,
             decimals: decimals || 8,
             creator: paymentAddress,  // Use pool wallet or creator
+            issuer: creator,          // Always the original creator wallet
             createdInTx: vtxoId || 'pending',  // Arkade L2 VTXO (pending if not yet created)
             vtxoId: vtxoId || null,            // Optional VTXO ID (null for pending)
             status: status || 'confirmed',     // Default to confirmed for backward compat
@@ -599,12 +634,149 @@ export function createApiServer() {
     }
   });
 
+  // Finalize token post-confirmation step (non-custodial).
+  // Client performs an ASP-side action (currently: send 1000 sats to self) and calls this with the resulting txid.
+  // For backward compatibility we also accept the legacy {vtxoId} payload from the older settle() flow.
+  app.post('/api/tokens/:tokenId/settle',
+    [
+      body('txid').optional().isString().trim().notEmpty().isLength({ max: 200 }),
+      body('vtxoId').optional().isString().trim().notEmpty().isLength({ max: 200 }),
+      body().custom((value) => {
+        if (!value?.txid && !value?.vtxoId) {
+          throw new Error('txid or vtxoId is required');
+        }
+        return true;
+      }),
+    ],
+    async (req: express.Request, res: express.Response) => {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
+      }
+
+      const tokenId = req.params.tokenId;
+      const { txid, vtxoId } = req.body as { txid?: string; vtxoId?: string };
+      const settlementId = (txid || vtxoId) as string;
+
+      try {
+        const token = await prisma.token.findUnique({ where: { id: tokenId } });
+        if (!token) {
+          return res.status(404).json({ error: 'Token not found' });
+        }
+
+        if (token.status === 'confirmed' && token.vtxoId) {
+          return res.status(409).json({ error: 'Token already settled/confirmed' });
+        }
+
+        // Guard: ensure L1 confirmation happened before accepting settlement.
+        // If the monitor hasn't updated yet, check mempool.space directly.
+        if (token.status === 'pending') {
+          try {
+            const txid = token.bitcoinProof || token.id;
+            const resp = await fetch(`https://mempool.space/api/tx/${txid}/status`);
+            if (!resp.ok) {
+              return res.status(400).json({ error: 'Unable to verify Bitcoin confirmation yet' });
+            }
+            const status = await resp.json() as { confirmed: boolean };
+            if (!status.confirmed) {
+              return res.status(400).json({ error: 'Token not ready for settlement yet (still pending confirmations)' });
+            }
+          } catch (e) {
+            return res.status(400).json({ error: 'Unable to verify Bitcoin confirmation yet' });
+          }
+        }
+
+        // Prevent reuse (double-spend / replay).
+        const existingUsage = await prisma.vtxoUsage.findUnique({ where: { outpoint: settlementId } });
+        if (existingUsage) {
+          return res.status(409).json({ error: 'VTXO already used' });
+        }
+
+        const issuerAddress = token.issuer || token.creator;
+
+        // Verify with ASP.
+        // In local development, the configured ARKADE_ASP_URL may not expose the /v1 verification API
+        // (e.g. if using a gateway URL). In that case, allow settlement to finalize (non-custodial)
+        // and rely on client-side settlement success + server-side vtxoUsage uniqueness.
+        const relaxedVerification = process.env.NODE_ENV !== 'production' || process.env.ALLOW_UNVERIFIED_SETTLEMENT === 'true';
+
+        // Prefer verifying as an ASP virtualTx/commitmentTx identifier.
+        // The current flow uses send-to-self which returns an ASP txid.
+        const okTx = await arkadeClient.verifyTransaction(settlementId);
+        const okVtxo = okTx ? true : await arkadeClient.verifyVtxo(settlementId, issuerAddress);
+        if (!okTx) {
+          if (!relaxedVerification) {
+            return res.status(400).json({ error: 'VTXO/transaction not verifiable on ASP' });
+          }
+
+          logger.warn(
+            { tokenId, settlementId, issuerAddress, aspUrl: process.env.ARKADE_ASP_URL },
+            'ASP verification failed; proceeding due to relaxed verification'
+          );
+        }
+
+        const updatedToken = await prisma.$transaction(async (tx) => {
+          const updated = await tx.token.update({
+            where: { id: tokenId },
+            data: {
+              status: 'confirmed',
+              vtxoId: settlementId,
+              createdInTx: settlementId,
+              updatedAt: new Date(),
+            },
+          });
+
+          await tx.vtxoUsage.create({
+            data: {
+              outpoint: settlementId,
+              tokenId,
+              usedInTx: settlementId,
+            },
+          });
+
+          // Pending tokens skip initial balances at registration; ensure issuer has the initial mint.
+          await tx.tokenBalance.upsert({
+            where: {
+              address_tokenId: {
+                address: issuerAddress,
+                tokenId,
+              },
+            },
+            update: {
+              balance: token.totalSupply,
+            },
+            create: {
+              address: issuerAddress,
+              tokenId,
+              balance: token.totalSupply,
+            },
+          });
+
+          return updated;
+        });
+
+        // Notify issuer wallet.
+        io.to(`wallet:${issuerAddress}`).emit('token-confirmed', {
+          tokenId,
+          vtxoId,
+          status: 'confirmed',
+          message: `🎉 Token ${token.symbol} has been created successfully!`,
+        });
+
+        return res.json(updatedToken);
+      } catch (error) {
+        logger.error({ error }, 'Error finalizing token settlement');
+        return res.status(500).json({ error: 'Internal server error' });
+      }
+    }
+  );
+
   // Register token transfer (called by wallet after transfer)
   app.post('/api/transfers',
     [
       body('tokenId').isString().trim().notEmpty(),
-      body('fromAddress').isString().matches(/^[a-km-zA-HJ-NP-Z1-9]{25,90}$/),
-      body('toAddress').isString().matches(/^[a-km-zA-HJ-NP-Z1-9]{25,90}$/),
+      body('fromAddress').isString().custom((value) => isValidArkadeAddress(value)),
+      body('toAddress').isString().custom((value) => isValidArkadeAddress(value)),
       body('amount').isString().matches(/^\d+$/),
       body('vtxoId').isString().trim().notEmpty(),
     ],
@@ -1103,7 +1275,7 @@ export function createApiServer() {
   app.post('/api/presale/purchase',
     [
       body('tokenId').isString().trim().notEmpty(),
-      body('walletAddress').isString().matches(/^[a-km-zA-HJ-NP-Z1-9]{25,90}$/),
+      body('walletAddress').isString().custom((value) => isValidArkadeAddress(value)),
       body('batchesPurchased').isInt({ min: 1, max: 1000 }),
       body('totalPaid').isString().matches(/^\d+$/),
       body('txid').isString().trim().notEmpty(),
@@ -1632,6 +1804,10 @@ export function createApiServer() {
       // Validate required fields (NO TXID REQUIRED - payment happens later!)
       if (!tokenId || !walletAddress || !batchesPurchased || !totalPaid) {
         return res.status(400).json({ error: 'Missing required fields' });
+      }
+
+      if (!isValidArkadeAddress(String(walletAddress))) {
+        return res.status(400).json({ error: 'Invalid walletAddress' });
       }
 
       // Validate token exists and is presale

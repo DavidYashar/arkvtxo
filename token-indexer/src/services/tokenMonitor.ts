@@ -5,17 +5,15 @@
  * and completes Arkade Layer 2 settlement automatically
  */
 
-import { PrismaClient, Prisma } from '@prisma/client';
-import { Wallet, SingleKey } from '@arkade-os/sdk';
+import { PrismaClient } from '@prisma/client';
 import pino from 'pino';
 
 const prisma = new PrismaClient();
 const logger = pino({ level: 'info' });
 
 const BITCOIN_MEMPOOL_API = 'https://mempool.space/api';
-const ASP_URL = process.env.ARKADE_ASP_URL || 'https://arkade.computer';
 const CHECK_INTERVAL_MS = 30_000; // Check every 30 seconds
-const REQUIRED_CONFIRMATIONS = 1; // Minimum confirmations before settlement
+const REQUIRED_CONFIRMATIONS = 1; // Minimum confirmations before allowing settlement
 
 interface MempoolTxStatus {
   confirmed: boolean;
@@ -31,6 +29,7 @@ interface PendingToken {
   totalSupply: string;
   decimals: number;
   creator: string;
+  issuer?: string;
   status: string;
   createdAt: Date;
 }
@@ -54,33 +53,6 @@ async function checkBitcoinConfirmation(txid: string): Promise<number> {
 }
 
 /**
- * Complete Arkade Layer 2 settlement for a confirmed token
- */
-async function completeArkadeSettlement(token: PendingToken): Promise<string | null> {
-  try {
-    logger.info({ tokenId: token.id, symbol: token.symbol }, '🌊 Starting Arkade Layer 2 settlement...');
-    
-    // For now, we'll create a simple VTXO to track the token
-    // In production, you'd use the creator's private key to settle
-    // This is a placeholder - actual implementation depends on your key management
-    
-    // Placeholder: Return a dummy VTXO ID
-    // In production, you'd do:
-    // const identity = SingleKey.fromHex(creatorPrivateKey);
-    // const wallet = await Wallet.create({ identity, arkServerUrl: ASP_URL });
-    // const vtxoId = await wallet.sendBitcoin({ address: token.creator, amount: 1000 });
-    
-    const vtxoId = `vtxo_${token.id.slice(0, 16)}`;
-    
-    logger.info({ tokenId: token.id, vtxoId }, '✅ Arkade settlement complete');
-    return vtxoId;
-  } catch (error: any) {
-    logger.error({ tokenId: token.id, error: error.message }, '❌ Arkade settlement failed');
-    return null;
-  }
-}
-
-/**
  * Process a single pending token
  */
 async function processPendingToken(token: PendingToken): Promise<boolean> {
@@ -100,16 +72,15 @@ async function processPendingToken(token: PendingToken): Promise<boolean> {
     }
     
     logger.info({ tokenId: token.id, confirmations }, '✅ Bitcoin transaction confirmed!');
-    
-    // Complete Arkade settlement
-    const vtxoId = await completeArkadeSettlement(token);
-    
-    // Update token status in database
+
+    // Bitcoin is confirmed. Next step is a NON-CUSTODIAL ASP action:
+    // the client wallet sends a small amount (1000 sats) to itself via the ASP,
+    // then POST /api/tokens/:tokenId/settle with the resulting txid.
     await prisma.token.update({
       where: { id: token.id },
       data: {
-        status: 'confirmed',
-        vtxoId: vtxoId,
+        status: 'awaiting_settlement',
+        confirmations: confirmations,
         updatedAt: new Date(),
       },
     });
@@ -117,25 +88,26 @@ async function processPendingToken(token: PendingToken): Promise<boolean> {
     logger.info({ 
       tokenId: token.id, 
       symbol: token.symbol,
-      vtxoId 
-    }, '🎉 Token creation complete!');
+    }, '✅ Token ready for settlement (awaiting_settlement)');
     
     // Emit WebSocket notification to creator
     try {
       const { getIO } = await import('../api/server');
       const io = getIO();
       if (io) {
-        const roomName = `wallet:${token.creator}`;
-        logger.info({ tokenId: token.id, creator: token.creator, roomName }, '📡 Emitting WebSocket notification to room');
-        
-        // Notify the creator's wallet
-        io.to(roomName).emit('token-confirmed', {
+        const issuerAddress = token.issuer || token.creator;
+        const roomName = `wallet:${issuerAddress}`;
+        logger.info({ tokenId: token.id, issuerAddress, roomName }, '📡 Emitting WebSocket notification to room');
+
+        // Notify the issuer wallet to perform client-side finalization.
+        io.to(roomName).emit('token-bitcoin-confirmed', {
           tokenId: token.id,
           name: token.name,
           symbol: token.symbol,
-          vtxoId,
-          status: 'confirmed',
-          message: `🎉 Token ${token.symbol} has been created successfully!`
+          issuerAddress,
+          status: 'awaiting_settlement',
+          confirmations,
+          message: `✅ Bitcoin confirmed for ${token.symbol}. Finalizing via ASP self-send...`
         });
         
         logger.info({ tokenId: token.id, roomName }, '✅ WebSocket notification sent');
@@ -203,11 +175,11 @@ function stopMonitoringToken(tokenId: string): void {
 async function checkSingleToken(tokenId: string): Promise<void> {
   try {
     const token = await prisma.token.findUnique({
-      where: { id: tokenId, status: 'pending' }
+      where: { id: tokenId }
     });
-    
-    if (!token) {
-      // Token no longer pending (confirmed or deleted)
+
+    if (!token || token.status !== 'pending') {
+      // Token no longer pending (confirmed/failed/deleted)
       stopMonitoringToken(tokenId);
       return;
     }
