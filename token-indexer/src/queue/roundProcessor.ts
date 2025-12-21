@@ -23,13 +23,15 @@ import { PrismaClient } from '@prisma/client';
 import { queueManager } from './queueManager';
 import { PurchaseRequest } from './types';
 import { logger } from '../utils/logger';
+import { advisoryLockKeysFromTokenId } from '../utils/advisoryLock';
 import { queryHistoryViaSdk } from '../services/arkSdk';
 import { PRESALE_POOL_WALLETS } from '../config/presale-pool';
 import { TxType } from '@arkade-os/sdk';
 
 const prisma = new PrismaClient();
 const MAX_REQUESTS_PER_ROUND = 10;
-const PAYMENT_TIMEOUT_MS = 20 * 1000; // 20 seconds (enough time for 16s VTXO verification)
+// Cloud deployments are slower (network + DB + ASP history propagation). Keep this generous.
+const PAYMENT_TIMEOUT_MS = 60 * 1000; // 60 seconds
 
 interface RoundResult {
   roundNumber: number;
@@ -42,9 +44,6 @@ interface RoundResult {
 
 class RoundProcessor {
   private roundNumber: number = 0;
-  private isProcessingSupplyCheck: boolean = false;
-  private isProcessingPayments: boolean = false;
-  private isProcessingTimeouts: boolean = false;
 
   /**
    * PHASE 1: Process supply check and emit payment requests
@@ -54,90 +53,147 @@ class RoundProcessor {
    * @param io - Socket.IO instance for WebSocket notifications
    */
   async processSupplyCheckRound(tokenId: string, io?: any): Promise<void> {
-    if (this.isProcessingSupplyCheck) {
-      logger.warn({ tokenId }, 'Supply check already processing, skipping');
-      return;
-    }
-
-    this.isProcessingSupplyCheck = true;
     this.roundNumber++;
     
     const startTime = Date.now();
     logger.info({ tokenId, roundNumber: this.roundNumber }, '🎯 Supply check round started');
 
     try {
-      // Get pending requests WITHOUT payment (paymentStatus='pending', txid=null)
-      // Skip requests already in 'payment-requested' state (waiting for payment)
-      const allPending = queueManager.getPendingRequests(tokenId);
-      const pendingPayment = allPending.filter(r => 
-        !r.txid && 
-        (!r.paymentStatus || r.paymentStatus === 'pending')
-      );
-      const requests = pendingPayment.slice(0, MAX_REQUESTS_PER_ROUND);
+      const { key1: lockKey1, key2: lockKey2 } = advisoryLockKeysFromTokenId(tokenId);
 
-      if (requests.length === 0) {
+      const { acceptedToNotify, rejectedToNotify, creatorAddress } = await prisma.$transaction(
+        async (tx) => {
+          // Prevent concurrent supply-check rounds for this token across instances
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(${lockKey1}::int, ${lockKey2}::int)`;
+
+          // Fetch pending requests WITHOUT payment (txid=null) and awaiting payment request
+          const dbRequests = await tx.purchaseRequest.findMany({
+            where: {
+              tokenId,
+              status: 'pending',
+              txid: null,
+              paymentStatus: 'pending'
+            },
+            orderBy: [{ timestamp: 'asc' }, { id: 'asc' }],
+            take: MAX_REQUESTS_PER_ROUND
+          });
+
+          if (dbRequests.length === 0) {
+            return { acceptedToNotify: [], rejectedToNotify: [], creatorAddress: undefined as string | undefined };
+          }
+
+          const requests: PurchaseRequest[] = dbRequests.map((req) => ({
+            id: req.id,
+            tokenId: req.tokenId,
+            walletAddress: req.walletAddress,
+            batchesPurchased: req.batchesPurchased,
+            totalPaid: req.totalPaid,
+            txid: req.txid,
+            timestamp: Number(req.timestamp),
+            status: req.status as any,
+            paymentStatus: req.paymentStatus as any,
+            paymentRequestedAt: req.paymentRequestedAt || undefined,
+            roundNumber: req.roundNumber || undefined,
+            rejectionReason: req.rejectionReason || undefined
+          }));
+
+          logger.info({
+            tokenId,
+            roundNumber: this.roundNumber,
+            requestCount: requests.length
+          }, `📥 Checking supply for ${requests.length} request(s)`);
+
+          const { accepted, rejected } = await this.checkSupplyForBatch(tokenId, requests, tx);
+
+          // Mark accepted requests as payment-requested
+          if (accepted.length > 0) {
+            await tx.purchaseRequest.updateMany({
+              where: {
+                id: { in: accepted.map((r) => r.id) },
+                status: 'pending',
+                txid: null,
+                paymentStatus: 'pending'
+              },
+              data: {
+                paymentStatus: 'payment-requested',
+                paymentRequestedAt: new Date(),
+                roundNumber: this.roundNumber
+              }
+            });
+          }
+
+          // Reject only when supply is permanently exhausted (i.e., already sold out)
+          // or request is invalid. Do NOT reject just because current supply is reserved.
+          for (const r of rejected) {
+            await tx.purchaseRequest.update({
+              where: { id: r.id },
+              data: {
+                status: 'rejected',
+                rejectionReason: r.rejectionReason,
+                paymentStatus: 'rejected',
+                roundNumber: this.roundNumber,
+                processedAt: new Date()
+              }
+            });
+          }
+
+          const token = await tx.token.findUnique({ where: { id: tokenId }, select: { creator: true } });
+
+          return {
+            acceptedToNotify: accepted.map((r) => ({
+              id: r.id,
+              walletAddress: r.walletAddress,
+              totalPaid: r.totalPaid,
+              batchesPurchased: r.batchesPurchased
+            })),
+            rejectedToNotify: rejected.map((r) => ({
+              id: r.id,
+              walletAddress: r.walletAddress,
+              rejectionReason: r.rejectionReason,
+              batchesPurchased: r.batchesPurchased
+            })),
+            creatorAddress: token?.creator
+          };
+        },
+        { timeout: 15000 }
+      );
+
+      if (acceptedToNotify.length === 0 && rejectedToNotify.length === 0) {
         logger.debug({ tokenId, roundNumber: this.roundNumber }, '📭 No requests awaiting payment');
         return;
       }
 
-      logger.info({ 
-        tokenId, 
-        roundNumber: this.roundNumber, 
-        requestCount: requests.length,
-        totalPending: pendingPayment.length
-      }, `📥 Checking supply for ${requests.length} request(s)`);
-
-      // Check supply for all requests
-      const { accepted, rejected } = await this.checkSupplyForBatch(tokenId, requests);
-
-      logger.info({
-        tokenId,
-        roundNumber: this.roundNumber,
-        accepted: accepted.length,
-        rejected: rejected.length
-      }, '✅ Supply check complete');
-
-      // Emit payment-requested events for accepted requests (only once per request)
-      if (accepted.length > 0 && io) {
-        const token = await prisma.token.findUnique({ where: { id: tokenId } });
-        
-        for (const request of accepted) {
-          // Only emit if not already in payment-requested state
-          // This prevents duplicate emissions that reset the countdown
-          if (request.paymentStatus === 'payment-requested') {
-            logger.debug({
-              requestId: request.id
-            }, '⏭️  Payment already requested, skipping duplicate emission');
-            continue;
-          }
-
-          // Emit WebSocket event
-          io.to(`wallet:${request.walletAddress}`).emit('payment-requested', {
-            requestId: request.id,
+      // Emit payment-requested events for accepted requests
+      if (acceptedToNotify.length > 0 && io) {
+        for (const req of acceptedToNotify) {
+          io.to(`wallet:${req.walletAddress}`).emit('payment-requested', {
+            requestId: req.id,
             tokenId,
-            amount: request.totalPaid,
-            creatorAddress: token?.creator,
-            timeoutSeconds: 20,
+            amount: req.totalPaid,
+            creatorAddress,
+            timeoutSeconds: Math.floor(PAYMENT_TIMEOUT_MS / 1000),
             roundNumber: this.roundNumber
           });
 
-          // Update payment status
-          await queueManager.updatePaymentStatus(request.id, 'payment-requested');
-
           logger.info({
-            requestId: request.id,
-            walletAddress: request.walletAddress.slice(0, 20) + '...',
-            amount: request.totalPaid
+            requestId: req.id,
+            walletAddress: req.walletAddress.slice(0, 20) + '...',
+            amount: req.totalPaid
           }, '💳 Payment requested from user');
         }
       }
 
-      // Reject requests that exceed supply (notify immediately)
-      if (rejected.length > 0) {
-        await this.notifyRejectedUsers(rejected, tokenId, io);
-        
-        // Clean up rejected requests from queue
-        rejected.forEach(r => queueManager.removeRequest(tokenId, r.id));
+      // Notify rejections
+      if (rejectedToNotify.length > 0 && io) {
+        for (const req of rejectedToNotify) {
+          io.to(`wallet:${req.walletAddress}`).emit('purchase-rejected', {
+            requestId: req.id,
+            tokenId,
+            reason: req.rejectionReason,
+            batchesRequested: req.batchesPurchased,
+            roundNumber: this.roundNumber
+          });
+        }
       }
 
       const duration = Date.now() - startTime;
@@ -145,8 +201,8 @@ class RoundProcessor {
         tokenId, 
         roundNumber: this.roundNumber,
         duration,
-        paymentRequested: accepted.length,
-        rejected: rejected.length
+        paymentRequested: acceptedToNotify.length,
+        rejected: rejectedToNotify.length
       }, '🎉 Supply check round completed');
 
     } catch (error: any) {
@@ -157,8 +213,108 @@ class RoundProcessor {
         stack: error.stack
       }, '❌ Supply check round failed');
     } finally {
-      this.isProcessingSupplyCheck = false;
+      // No global in-memory processing flags; concurrency safety is handled by DB locks.
     }
+  }
+
+  /**
+   * Record payment txid for a request (idempotent).
+   * Does NOT reject if verification is slow.
+   */
+  async submitPaymentTxid(requestId: string, txid: string): Promise<boolean> {
+    try {
+      const req = await prisma.purchaseRequest.findUnique({ where: { id: requestId } });
+      if (!req) return false;
+
+      // Allow idempotent re-submissions
+      if (req.txid && req.txid === txid && req.paymentStatus === 'payment-sent') {
+        return true;
+      }
+
+      if (req.paymentStatus !== 'payment-requested' && req.paymentStatus !== 'payment-sent') {
+        logger.warn({ requestId, currentStatus: req.paymentStatus }, 'Request not in payable state');
+        return false;
+      }
+
+      if (req.paymentStatus === 'payment-requested' && req.paymentRequestedAt) {
+        const elapsedMs = Date.now() - req.paymentRequestedAt.getTime();
+        if (elapsedMs > PAYMENT_TIMEOUT_MS) {
+          logger.warn({ requestId, elapsedSeconds: elapsedMs / 1000 }, '⏰ Payment window expired');
+          return false;
+        }
+      }
+
+      await prisma.purchaseRequest.update({
+        where: { id: requestId },
+        data: {
+          txid,
+          paymentStatus: 'payment-sent',
+          paymentSubmittedAt: new Date()
+        }
+      });
+
+      return true;
+    } catch (error: any) {
+      logger.error({ requestId, error: error.message }, 'Failed to record payment txid');
+      return false;
+    }
+  }
+
+  /**
+   * Verify a single paid request and finalize it if verified.
+   * Returns confirmed if the txid is visible; otherwise returns pending.
+   */
+  async verifyAndFinalizeSingleRequest(
+    requestId: string,
+    io?: any
+  ): Promise<{ status: 'confirmed' | 'pending' | 'rejected' }>
+  {
+    const req = await prisma.purchaseRequest.findUnique({ where: { id: requestId } });
+    if (!req) return { status: 'rejected' };
+
+    if (req.status !== 'pending') {
+      return req.status === 'confirmed' ? { status: 'confirmed' } : { status: 'rejected' };
+    }
+
+    if (req.paymentStatus !== 'payment-sent' || !req.txid) {
+      return { status: 'pending' };
+    }
+
+    // If verification is slow, do NOT reject; client can retry later.
+    const verified = await this.verifyVtxos([
+      {
+        id: req.id,
+        tokenId: req.tokenId,
+        walletAddress: req.walletAddress,
+        batchesPurchased: req.batchesPurchased,
+        totalPaid: req.totalPaid,
+        txid: req.txid,
+        timestamp: Number(req.timestamp),
+        status: req.status as any,
+        paymentStatus: req.paymentStatus as any,
+        roundNumber: req.roundNumber || undefined,
+        rejectionReason: req.rejectionReason || undefined
+      }
+    ], req.tokenId);
+
+    if (verified.length === 0) {
+      return { status: 'pending' };
+    }
+
+    // Finalize atomically under lock
+    await this.executeAtomicBatch(req.tokenId, verified);
+
+    if (io) {
+      io.to(`wallet:${req.walletAddress}`).emit('purchase-confirmed', {
+        requestId: req.id,
+        tokenId: req.tokenId,
+        batchesPurchased: req.batchesPurchased,
+        totalPaid: req.totalPaid,
+        roundNumber: this.roundNumber
+      });
+    }
+
+    return { status: 'confirmed' };
   }
 
   /**
@@ -168,13 +324,6 @@ class RoundProcessor {
    * @param io - Socket.IO instance for WebSocket notifications
    */
   async processPaidRequests(io?: any): Promise<void> {
-    if (this.isProcessingPayments) {
-      logger.debug('Payment processing already running, skipping');
-      return;
-    }
-
-    this.isProcessingPayments = true;
-
     try {
       // Find all requests with payment sent (txid provided, awaiting verification)
       const paidRequests = await prisma.purchaseRequest.findMany({
@@ -222,49 +371,12 @@ class RoundProcessor {
           const verified = await this.verifyVtxos(requests, tokenId);
 
           if (verified.length > 0) {
-            // Execute atomic batch
             await this.executeAtomicBatch(tokenId, verified);
-
-            // Update payment status to verified
-            for (const request of verified) {
-              await queueManager.updatePaymentStatus(request.id, 'verified');
-            }
-
-            // Notify confirmed users
             await this.notifyConfirmedUsers(verified, tokenId, io);
-
-            // Clean up from queue
-            verified.forEach(r => queueManager.removeRequest(tokenId, r.id));
           }
 
-          // Handle verification failures
-          const failed = requests.filter(r => !verified.find(v => v.id === r.id));
-          
-          for (const request of failed) {
-            await queueManager.updateRequestStatus(
-              request.id,
-              'rejected',
-              this.roundNumber,
-              'VTXO verification failed'
-            );
-
-            if (io) {
-              io.to(`wallet:${request.walletAddress}`).emit('purchase-rejected', {
-                requestId: request.id,
-                tokenId,
-                reason: 'Payment verification failed',
-                batchesRequested: request.batchesPurchased,
-                roundNumber: this.roundNumber
-              });
-            }
-
-            queueManager.removeRequest(tokenId, request.id);
-
-            logger.warn({
-              requestId: request.id,
-              walletAddress: request.walletAddress.slice(0, 20) + '...'
-            }, '❌ VTXO verification failed');
-          }
+          // IMPORTANT: Do not reject paid requests just because history is delayed.
+          // Leave them as payment-sent; they can be retried via submit-payment.
 
         } catch (error: any) {
           logger.error({ 
@@ -280,7 +392,7 @@ class RoundProcessor {
         stack: error.stack
       }, '❌ Payment processing failed');
     } finally {
-      this.isProcessingPayments = false;
+      // no-op
     }
   }
 
@@ -288,13 +400,7 @@ class RoundProcessor {
    * PHASE 3: Handle payment timeouts
    * Runs every 5 seconds to reject requests where payment window expired
    */
-  async processPaymentTimeouts(io?: any): Promise<void> {
-    if (this.isProcessingTimeouts) {
-      logger.debug('Timeout processing already running, skipping');
-      return;
-    }
-
-    this.isProcessingTimeouts = true;
+  async processPaymentTimeouts(io?: any, tokenId?: string): Promise<void> {
 
     try {
       const now = new Date();
@@ -305,6 +411,7 @@ class RoundProcessor {
         where: {
           paymentStatus: 'payment-requested',
           status: 'pending',
+          ...(tokenId ? { tokenId } : {}),
           paymentRequestedAt: {
             lt: cutoff
           }
@@ -318,23 +425,23 @@ class RoundProcessor {
       logger.info({ count: timedOut.length }, '⏰ Processing payment timeouts');
 
       for (const request of timedOut) {
-        // Reject the request
-        await queueManager.updateRequestStatus(
-          request.id,
-          'rejected',
-          this.roundNumber,
-          'Payment timeout (15 seconds)'
-        );
-
-        // Remove from queue
-        queueManager.removeRequest(request.tokenId, request.id);
+        await prisma.purchaseRequest.update({
+          where: { id: request.id },
+          data: {
+            status: 'rejected',
+            rejectionReason: `Payment timeout (${Math.floor(PAYMENT_TIMEOUT_MS / 1000)} seconds)`,
+              paymentStatus: 'rejected',
+            roundNumber: this.roundNumber,
+            processedAt: new Date()
+          }
+        });
 
         // Notify user
         if (io) {
           io.to(`wallet:${request.walletAddress}`).emit('purchase-rejected', {
             requestId: request.id,
             tokenId: request.tokenId,
-            reason: 'Payment window expired (15 seconds)',
+            reason: `Payment window expired (${Math.floor(PAYMENT_TIMEOUT_MS / 1000)} seconds)`,
             batchesRequested: request.batchesPurchased,
             roundNumber: this.roundNumber
           });
@@ -344,7 +451,7 @@ class RoundProcessor {
           requestId: request.id,
           walletAddress: request.walletAddress.slice(0, 20) + '...',
           elapsedSeconds: (now.getTime() - (request.paymentRequestedAt?.getTime() || 0)) / 1000
-        }, '⏰ Request timed out (15s payment window)');
+        }, '⏰ Request timed out (payment window)');
       }
 
     } catch (error: any) {
@@ -353,7 +460,7 @@ class RoundProcessor {
         stack: error.stack
       }, '❌ Timeout processing failed');
     } finally {
-      this.isProcessingTimeouts = false;
+      // no-op
     }
   }
 
@@ -368,9 +475,9 @@ class RoundProcessor {
   private async checkSupplyForBatch(
     tokenId: string, 
     requests: PurchaseRequest[]
-  ): Promise<{ accepted: PurchaseRequest[], rejected: PurchaseRequest[] }> {
+  , db: PrismaClient | any = prisma): Promise<{ accepted: PurchaseRequest[], rejected: PurchaseRequest[] }> {
     
-    const token = await prisma.token.findUnique({ where: { id: tokenId } });
+    const token = await db.token.findUnique({ where: { id: tokenId } });
     if (!token) {
       throw new Error(`Token ${tokenId} not found`);
     }
@@ -381,18 +488,32 @@ class RoundProcessor {
     const maxBatches = Number(totalSupply / batchAmount);
 
     // Get total batches already sold
-    const soldAgg = await prisma.presalePurchase.aggregate({
+    const soldAgg = await db.presalePurchase.aggregate({
       where: { tokenId },
       _sum: { batchesPurchased: true }
     });
     const batchesSold = soldAgg._sum.batchesPurchased || 0;
-    const batchesRemaining = maxBatches - batchesSold;
+
+    // Reserve supply for in-flight requests (payment requested or payment sent)
+    const reservedAgg = await db.purchaseRequest.aggregate({
+      where: {
+        tokenId,
+        status: 'pending',
+        paymentStatus: { in: ['payment-requested', 'payment-sent'] }
+      },
+      _sum: { batchesPurchased: true }
+    });
+    const batchesReserved = reservedAgg._sum.batchesPurchased || 0;
+
+    const batchesRemaining = maxBatches - batchesSold - batchesReserved;
+    const permanentlySoldOut = batchesSold >= maxBatches;
 
     logger.info({
       tokenId,
       roundNumber: this.roundNumber,
       maxBatches,
       batchesSold,
+      batchesReserved,
       batchesRemaining,
       percentSold: ((batchesSold / maxBatches) * 100).toFixed(2) + '%'
     }, '📊 Supply status');
@@ -405,6 +526,15 @@ class RoundProcessor {
     let cumulativeBatches = 0;
 
     for (const request of sorted) {
+      // Reject invalid asks (cannot ever fit)
+      if (request.batchesPurchased > maxBatches) {
+        rejected.push({
+          ...request,
+          rejectionReason: `Invalid request. Max purchasable is ${maxBatches} batch(es).`
+        });
+        continue;
+      }
+
       if (cumulativeBatches + request.batchesPurchased <= batchesRemaining) {
         // This request fits!
         accepted.push(request);
@@ -418,31 +548,30 @@ class RoundProcessor {
           batchesRemaining
         }, '✅ Request accepted');
       } else {
-        // This request would exceed supply
-        const canPurchase = batchesRemaining - cumulativeBatches;
-        const rejectionReason = canPurchase > 0
-          ? `Insufficient supply. Only ${canPurchase} batch(es) remaining. You requested ${request.batchesPurchased}.`
-          : 'Supply exhausted. All batches sold out.';
-        
-        rejected.push({
-          ...request,
-          rejectionReason
-        });
-        
-        await queueManager.updateRequestStatus(
-          request.id,
-          'rejected',
-          this.roundNumber,
-          rejectionReason
-        );
-        
-        logger.warn({
-          requestId: request.id,
-          walletAddress: request.walletAddress.slice(0, 20) + '...',
-          batchesRequested: request.batchesPurchased,
-          batchesAvailable: canPurchase,
-          reason: rejectionReason
-        }, '❌ Request rejected');
+        // This request doesn't fit right now.
+        // If supply is permanently sold out (all batches confirmed sold), reject.
+        // Otherwise keep it pending in the queue to be promoted if a reservation frees up.
+        if (permanentlySoldOut) {
+          const rejectionReason = 'Supply exhausted. All batches sold out.';
+          rejected.push({
+            ...request,
+            rejectionReason
+          });
+
+          logger.warn({
+            requestId: request.id,
+            walletAddress: request.walletAddress.slice(0, 20) + '...',
+            batchesRequested: request.batchesPurchased,
+            reason: rejectionReason
+          }, '❌ Request rejected (sold out)');
+        } else {
+          logger.info({
+            requestId: request.id,
+            walletAddress: request.walletAddress.slice(0, 20) + '...',
+            batchesRequested: request.batchesPurchased,
+            batchesRemaining
+          }, '⏳ Request deferred (waiting for supply)');
+        }
       }
     }
 
@@ -474,99 +603,56 @@ class RoundProcessor {
             return null;
           }
 
-          // Get token to find current rotation wallet
-          const token = await prisma.token.findUnique({ 
-            where: { id: tokenId } 
-          });
-          
-          if (!token) {
-            logger.error({ 
-              requestId: request.id,
-              tokenId 
-            }, 'Token not found during VTXO verification');
-            return null;
-          }
-
-          // Find pool wallet private key
-          const poolWallet = PRESALE_POOL_WALLETS.find(w => w.address === token.creator);
-          if (!poolWallet) {
-            logger.error({ 
-              requestId: request.id,
-              tokenId,
-              creatorAddress: token.creator 
-            }, 'Pool wallet not found for token creator');
-            return null;
-          }
-
-          // Simple verification: Check if we received a new transaction with matching amount
-          // Wait for payment to settle in pool wallet (give ASP time to process)
           const expectedAmount = parseInt(request.totalPaid);
-          
+
           logger.info({
             requestId: request.id,
             txid: request.txid,
-            expectedAmount,
-            poolWalletAddress: poolWallet.address
-          }, '🔍 Verifying payment received...');
+            expectedAmount
+          }, '🔍 Verifying payment received (txid-based)...');
 
-          // Check wallet transaction history for recent incoming transaction with matching amount
+          const maxAttempts = 8;
+          const sleepMs = 3000;
           let paymentFound = false;
-          const maxAttempts = 4;
-          
+
           for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            // Wait 3 seconds before checking (give ASP time to process)
             if (attempt > 1) {
-              await new Promise(resolve => setTimeout(resolve, 3000));
+              await new Promise((resolve) => setTimeout(resolve, sleepMs));
             }
-            
-            const history = await queryHistoryViaSdk(poolWallet.privateKey);
-            
-            if (history.success && history.transactions) {
-              // Look for incoming transaction with matching amount in recent history (last 5 transactions)
-              const recentIncoming = history.transactions
-                .filter(tx => tx.type === TxType.TxReceived && tx.amount === expectedAmount)
-                .slice(0, 5);
-              
-              logger.info({
-                requestId: request.id,
-                attempt,
-                maxAttempts,
-                historyCount: history.total,
-                recentIncoming: recentIncoming.map(tx => ({
-                  amount: tx.amount,
-                  arkTxid: tx.arkTxid,
-                  createdAt: tx.createdAt
-                }))
-              }, `💰 Checking wallet history (attempt ${attempt}/${maxAttempts})`);
-              
-              if (recentIncoming.length > 0) {
+
+            // First try: verify by exact txid match across pool wallets
+            for (const w of PRESALE_POOL_WALLETS) {
+              const history = await queryHistoryViaSdk(w.privateKey);
+              if (!history.success || !history.transactions) continue;
+
+              const matched = history.transactions.find(
+                (tx) => tx.type === TxType.TxReceived && tx.arkTxid === request.txid
+              );
+
+              if (matched) {
                 paymentFound = true;
                 logger.info({
                   requestId: request.id,
-                  amount: expectedAmount,
-                  txid: request.txid
-                }, '✅ Payment verified in wallet history');
+                  txid: request.txid,
+                  poolWalletAddress: w.address,
+                  amount: matched.amount
+                }, '✅ Payment verified by txid in pool wallet history');
                 break;
               }
             }
-            
-            if (attempt < maxAttempts) {
-              logger.info({
-                requestId: request.id,
-                attempt,
-                maxAttempts
-              }, '⏳ Payment not yet visible, waiting 3s...');
-            }
+
+            if (paymentFound) break;
+
+            logger.info({ requestId: request.id, attempt, maxAttempts }, '⏳ Payment not yet visible, retrying...');
           }
-          
+
           if (!paymentFound) {
             logger.warn({
               requestId: request.id,
               txid: request.txid,
               expectedAmount,
-              poolWalletAddress: poolWallet.address,
-              totalWaitTime: '12 seconds'
-            }, '❌ Payment verification failed - no matching incoming transaction found after 4 attempts');
+              totalWaitTimeSeconds: Math.round(((maxAttempts - 1) * sleepMs) / 1000)
+            }, '❌ Payment verification failed - txid not found in any pool wallet history');
             return null;
           }
           
@@ -623,12 +709,39 @@ class RoundProcessor {
     }, '💾 Executing atomic batch transaction');
 
     // Use PostgreSQL advisory lock
-    const lockId = parseInt(tokenId.slice(0, 15), 16);
+    const { key1: lockKey1, key2: lockKey2 } = advisoryLockKeysFromTokenId(tokenId);
 
     await prisma.$transaction(async (tx) => {
       // Acquire lock
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${lockId}::bigint)`;
-      logger.info({ tokenId, lockId, roundNumber: this.roundNumber }, '🔒 Lock acquired');
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${lockKey1}::int, ${lockKey2}::int)`;
+      logger.info({ tokenId, lockKey1, lockKey2, roundNumber: this.roundNumber }, '🔒 Lock acquired');
+
+      // Safety: ensure sold+reserved does not exceed supply (defensive)
+      const token = await tx.token.findUnique({ where: { id: tokenId } });
+      if (!token) {
+        throw new Error(`Token ${tokenId} not found`);
+      }
+      const totalSupply = BigInt(token.totalSupply);
+      const batchAmount = BigInt(token.presaleBatchAmount || '0');
+      const maxBatches = Number(totalSupply / batchAmount);
+
+      const soldAgg = await tx.presalePurchase.aggregate({ where: { tokenId }, _sum: { batchesPurchased: true } });
+      const batchesSold = soldAgg._sum.batchesPurchased || 0;
+
+      const reservedAgg = await tx.purchaseRequest.aggregate({
+        where: {
+          tokenId,
+          status: 'pending',
+          paymentStatus: { in: ['payment-requested', 'payment-sent'] }
+        },
+        _sum: { batchesPurchased: true }
+      });
+      const batchesReserved = reservedAgg._sum.batchesPurchased || 0;
+
+      if (batchesSold + batchesReserved > maxBatches) {
+        logger.error({ tokenId, maxBatches, batchesSold, batchesReserved }, '🚨 Oversubscribed supply detected; refusing to finalize');
+        throw new Error('Supply oversubscribed');
+      }
 
       // Create all purchases atomically
       for (const request of validRequests) {
@@ -643,12 +756,16 @@ class RoundProcessor {
           }
         });
 
-        // Update request status in database
-        await queueManager.updateRequestStatus(
-          request.id,
-          'confirmed',
-          this.roundNumber
-        );
+        // Update request status in the SAME transaction (atomic)
+        await tx.purchaseRequest.update({
+          where: { id: request.id },
+          data: {
+            status: 'confirmed',
+            paymentStatus: 'verified',
+            roundNumber: this.roundNumber,
+            processedAt: new Date()
+          }
+        });
 
         logger.info({
           requestId: request.id,
@@ -749,7 +866,7 @@ class RoundProcessor {
    * Check if any processing is currently running
    */
   isProcessing(): boolean {
-    return this.isProcessingSupplyCheck || this.isProcessingPayments || this.isProcessingTimeouts;
+    return false;
   }
 }
 

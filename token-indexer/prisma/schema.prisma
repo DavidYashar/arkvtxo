@@ -142,6 +142,7 @@ model PurchaseRequest {
   status              String    // 'pending', 'processing', 'confirmed', 'rejected'
   paymentStatus       String    @default("pending") // 'pending', 'payment-requested', 'payment-sent', 'verified'
   paymentRequestedAt  DateTime? // When server requested payment (for 30s timeout)
+  paymentSubmittedAt  DateTime? // When user submitted txid (for verification deadline)
   roundNumber         Int?      // Which round processed this request
   rejectionReason     String?   // Reason if rejected (e.g., "Supply exhausted")
   submittedAt         DateTime  @default(now())

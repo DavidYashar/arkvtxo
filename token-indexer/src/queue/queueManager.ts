@@ -77,12 +77,7 @@ class QueueManager {
    */
   async addRequest(request: PurchaseRequest): Promise<number> {
     try {
-      // Add to in-memory queue
-      const queue = this.queues.get(request.tokenId) || [];
-      queue.push(request);
-      this.queues.set(request.tokenId, queue);
-
-      // Persist to database
+      // Persist to database first (DB is the source of truth; in-memory is best-effort only)
       await prisma.purchaseRequest.create({
         data: {
           id: request.id,
@@ -96,7 +91,13 @@ class QueueManager {
         }
       });
 
-      const position = this.getQueuePosition(request.tokenId, request.id);
+      // Best-effort: keep in-memory queue roughly in sync for local/dev flows.
+      const queue = this.queues.get(request.tokenId) || [];
+      queue.push(request);
+      this.queues.set(request.tokenId, queue);
+
+      // Compute queue position from DB (works correctly across multiple instances)
+      const position = await this.getQueuePositionDb(request.tokenId, request.id);
 
       logger.info({
         requestId: request.id,
@@ -115,6 +116,37 @@ class QueueManager {
       }, '❌ Failed to add request to queue');
       throw error;
     }
+  }
+
+  /**
+   * Compute queue position from the database (global truth).
+   * Position is 1-indexed among all status='pending' requests for a token,
+   * ordered by (timestamp ASC, id ASC).
+   */
+  async getQueuePositionDb(tokenId: string, requestId: string): Promise<number> {
+    const req = await prisma.purchaseRequest.findUnique({
+      where: { id: requestId },
+      select: { id: true, tokenId: true, timestamp: true, status: true }
+    });
+
+    if (!req || req.tokenId !== tokenId || req.status !== 'pending') {
+      return 0;
+    }
+
+    const ts = req.timestamp;
+
+    const rows = await prisma.$queryRaw<Array<{ position: number }>>`
+      SELECT COUNT(*)::int AS "position"
+      FROM "purchase_requests"
+      WHERE "tokenId" = ${tokenId}
+        AND "status" = 'pending'
+        AND (
+          "timestamp" < ${ts}
+          OR ("timestamp" = ${ts} AND "id" <= ${requestId})
+        )
+    `;
+
+    return rows?.[0]?.position ?? 0;
   }
 
   /**
@@ -246,24 +278,6 @@ class QueueManager {
     paymentStatus: 'pending' | 'payment-requested' | 'payment-sent' | 'verified'
   ): Promise<boolean> {
     try {
-      // Find request in memory
-      let foundRequest: PurchaseRequest | undefined;
-      let foundTokenId: string | undefined;
-
-      for (const [tokenId, queue] of this.queues) {
-        const request = queue.find(r => r.id === requestId);
-        if (request) {
-          foundRequest = request;
-          foundTokenId = tokenId;
-          break;
-        }
-      }
-
-      if (!foundRequest) {
-        logger.warn({ requestId }, 'Request not found for payment status update');
-        return false;
-      }
-
       // Update database
       const updateData: any = { paymentStatus };
       
@@ -271,10 +285,7 @@ class QueueManager {
         updateData.paymentRequestedAt = new Date();
       }
 
-      await prisma.purchaseRequest.update({
-        where: { id: requestId },
-        data: updateData
-      });
+      await prisma.purchaseRequest.update({ where: { id: requestId }, data: updateData });
 
       logger.info({
         requestId,
@@ -303,22 +314,6 @@ class QueueManager {
    */
   async submitPayment(requestId: string, txid: string): Promise<boolean> {
     try {
-      // Find request in memory
-      let foundRequest: PurchaseRequest | undefined;
-
-      for (const [_, queue] of this.queues) {
-        const request = queue.find(r => r.id === requestId);
-        if (request) {
-          foundRequest = request;
-          break;
-        }
-      }
-
-      if (!foundRequest) {
-        logger.warn({ requestId }, 'Request not found for payment submission');
-        return false;
-      }
-
       // Check if request is in correct state (payment-requested)
       const dbRequest = await prisma.purchaseRequest.findUnique({
         where: { id: requestId }
@@ -336,13 +331,14 @@ class QueueManager {
         return false;
       }
 
-      // Check if payment window expired (30 seconds)
+      // Check if payment window expired
       const now = new Date();
       const paymentRequestedAt = dbRequest.paymentRequestedAt;
       
       if (paymentRequestedAt) {
         const elapsedMs = now.getTime() - paymentRequestedAt.getTime();
-        const timeoutMs = 30 * 1000; // 30 seconds
+        // Keep this more generous for cloud latency (must match RoundProcessor timeout)
+        const timeoutMs = 60 * 1000; // 60 seconds
 
         if (elapsedMs > timeoutMs) {
           logger.warn({ 
@@ -352,9 +348,6 @@ class QueueManager {
           return false;
         }
       }
-
-      // Update request with payment
-      foundRequest.txid = txid;
 
       await prisma.purchaseRequest.update({
         where: { id: requestId },

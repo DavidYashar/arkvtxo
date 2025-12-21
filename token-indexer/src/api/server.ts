@@ -11,6 +11,7 @@ import { createServer } from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import { PrismaClient } from '@prisma/client';
 import { logger } from '../utils/logger';
+import { advisoryLockKeysFromTokenId } from '../utils/advisoryLock';
 import { ArkadeClient } from '../services/arkadeClient';
 import { 
   queryVtxosViaSdk, 
@@ -142,12 +143,8 @@ function setupWebSocket(io: SocketIOServer) {
   });
 
   // Initialize round timer with Socket.IO
-  import('../queue/roundTimer').then(({ roundTimer }) => {
-    roundTimer.initialize(io);
-    logger.info('⏱️  Round Timer initialized with WebSocket');
-  }).catch((error) => {
-    logger.error({ error: error.message }, 'Failed to initialize Round Timer');
-  });
+  // Presale processing is on-demand (triggered by API calls),
+  // so we intentionally do NOT start background timers here.
 
   logger.info(' WebSocket setup complete');
 }
@@ -1445,15 +1442,13 @@ export function createApiServer() {
       try {
         // Start fast atomic transaction (all ASP queries done above)
         const purchase = await prisma.$transaction(async (tx) => {
-          // Create numeric lock ID from tokenId (use first 16 hex chars)
-          // Convert to number (safe for 16 hex chars = 64 bits but we'll use smaller hash)
-          const lockId = parseInt(tokenId.slice(0, 15), 16); // Use 15 chars to stay in safe integer range
-          
-          // Acquire PostgreSQL advisory lock for this token
-          // This lock is released automatically when transaction commits
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(${lockId}::bigint)`;
-          
-          logger.info({ tokenId, lockId }, '🔒 Acquired database lock for purchase');
+          const { key1: lockKey1, key2: lockKey2 } = advisoryLockKeysFromTokenId(tokenId);
+
+          // Acquire PostgreSQL advisory lock for this token.
+          // Released automatically when transaction commits.
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(${lockKey1}::int, ${lockKey2}::int)`;
+
+          logger.info({ tokenId, lockKey1, lockKey2 }, '🔒 Acquired database lock for purchase');
           
           // Lock the token row to prevent concurrent modifications
           const [lockedToken] = await tx.$queryRaw<any[]>`
@@ -1826,38 +1821,64 @@ export function createApiServer() {
         totalPaid
       }, '📥 New round-based purchase request (NO PAYMENT YET)');
 
-      // Import queue manager dynamically to avoid circular deps
-      const { queueManager } = await import('../queue/queueManager');
+      // On-demand reliability flow:
+      // 1) cleanup expired reservations
+      // 2) enqueue request (DB source of truth)
+      // 3) promote queued requests immediately if supply allows (reserve, then notify)
+      const { roundProcessor } = await import('../queue/roundProcessor');
 
-      // Create purchase request WITHOUT TXID - payment comes later
-      const request = {
-        id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        tokenId,
-        walletAddress,
-        batchesPurchased,
-        totalPaid,
-        txid: null, // No payment yet!
-        timestamp: Date.now(),
-        status: 'pending' as const,
-        paymentStatus: 'pending' as const
-      };
+      await roundProcessor.processPaymentTimeouts(globalIO || undefined, tokenId);
 
-      // Add to queue
-      const queuePosition = await queueManager.addRequest(request);
+      // Serialize queue insertion per token so queue positions are unique even under concurrency.
+      const { key1: lockKey1, key2: lockKey2 } = advisoryLockKeysFromTokenId(tokenId);
+      const nowMs = Date.now();
 
-      // Calculate estimated wait time (15 seconds per round, max 10 requests per round)
-      const estimatedRounds = Math.ceil(queuePosition / 10);
-      const estimatedWaitSeconds = estimatedRounds * 15;
+      const { created, queuePosition } = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(${lockKey1}::int, ${lockKey2}::int)`;
+
+        const created = await tx.purchaseRequest.create({
+          data: {
+            tokenId,
+            walletAddress,
+            batchesPurchased: Number(batchesPurchased),
+            totalPaid: String(totalPaid),
+            txid: null,
+            timestamp: BigInt(nowMs),
+            status: 'pending',
+            paymentStatus: 'pending'
+          }
+        });
+
+        // Queue position must be stable under concurrency.
+        // Use database-generated submittedAt (microsecond resolution) for ordering.
+        const rows = await tx.$queryRaw<Array<{ position: number }>>`
+          SELECT COUNT(*)::int AS "position"
+          FROM "purchase_requests"
+          WHERE "tokenId" = ${tokenId}
+            AND "status" = 'pending'
+            AND (
+              "submittedAt" < ${created.submittedAt}
+              OR ("submittedAt" = ${created.submittedAt} AND "id" <= ${created.id})
+            )
+        `;
+
+        return { created, queuePosition: rows?.[0]?.position ?? 0 };
+      }, { timeout: 10000 });
+
+      await roundProcessor.processSupplyCheckRound(tokenId, globalIO || undefined);
+
+      // No fixed rounds anymore.
+      const estimatedWaitSeconds = 0;
 
       logger.info({
-        requestId: request.id,
+        requestId: created.id,
         walletAddress: walletAddress.slice(0, 20) + '...',
         queuePosition,
         estimatedWaitSeconds
       }, '✅ Request added to queue');
 
       res.json({
-        requestId: request.id,
+        requestId: created.id,
         queuePosition,
         estimatedWaitSeconds,
         message: `Request queued. Position: ${queuePosition}. Estimated wait: ${estimatedWaitSeconds}s.`
@@ -1897,11 +1918,15 @@ export function createApiServer() {
         txid: txid.slice(0, 20) + '...'
       }, '💳 Payment submission received');
 
-      // Import queue manager dynamically
-      const { queueManager } = await import('../queue/queueManager');
+      const { roundProcessor } = await import('../queue/roundProcessor');
 
-      // Submit payment to queue manager
-      const updated = await queueManager.submitPayment(requestId, txid);
+      // Best-effort cleanup for this token before accepting submissions
+      const reqRow = await prisma.purchaseRequest.findUnique({ where: { id: requestId }, select: { tokenId: true } });
+      if (reqRow?.tokenId) {
+        await roundProcessor.processPaymentTimeouts(globalIO || undefined, reqRow.tokenId);
+      }
+
+      const updated = await roundProcessor.submitPaymentTxid(requestId, txid);
 
       if (!updated) {
         logger.warn({ requestId }, '⚠️ Request not found or expired');
@@ -1910,11 +1935,21 @@ export function createApiServer() {
         });
       }
 
-      logger.info({ requestId }, '✅ Payment submitted for verification');
+      // Attempt verification + finalize synchronously (trade speed for reliability)
+      const result = await roundProcessor.verifyAndFinalizeSingleRequest(requestId, globalIO || undefined);
 
-      res.json({ 
-        success: true, 
-        message: 'Payment submitted and will be verified in the next round' 
+      if (result.status === 'confirmed') {
+        return res.json({
+          success: true,
+          status: 'confirmed',
+          message: 'Payment verified and purchase confirmed.'
+        });
+      }
+
+      return res.json({
+        success: true,
+        status: 'pending',
+        message: 'Payment recorded. Verification pending; retry shortly if not confirmed.'
       });
 
     } catch (error: any) {
@@ -1953,8 +1988,7 @@ export function createApiServer() {
         requestId
       }, '🚫 Payment cancellation requested');
 
-      // Import queue manager dynamically
-      const { queueManager } = await import('../queue/queueManager');
+      const { roundProcessor } = await import('../queue/roundProcessor');
 
       // Check if request exists and is in payment-requested state
       const request = await prisma.purchaseRequest.findUnique({
@@ -1978,16 +2012,18 @@ export function createApiServer() {
         });
       }
 
-      // Mark as rejected
-      await queueManager.updateRequestStatus(
-        requestId,
-        'rejected',
-        undefined,
-        'User canceled payment'
-      );
+      await prisma.purchaseRequest.update({
+        where: { id: requestId },
+        data: {
+          status: 'rejected',
+          paymentStatus: 'rejected',
+          rejectionReason: 'User canceled payment',
+          processedAt: new Date()
+        }
+      });
 
-      // Remove from queue (frees up supply)
-      queueManager.removeRequest(request.tokenId, requestId);
+      // Promote the next queued requests now that supply is freed
+      await roundProcessor.processSupplyCheckRound(request.tokenId, globalIO || undefined);
 
       logger.info({ requestId }, '✅ Payment request canceled and supply freed');
 
@@ -2018,34 +2054,74 @@ export function createApiServer() {
     try {
       const { tokenId, walletAddress } = req.params;
 
-      // Import queue manager dynamically
-      const { queueManager } = await import('../queue/queueManager');
+      // On-demand cleanup + promotion (no background loops)
+      const { roundProcessor } = await import('../queue/roundProcessor');
+      await roundProcessor.processPaymentTimeouts(globalIO || undefined, tokenId);
+      await roundProcessor.processSupplyCheckRound(tokenId, globalIO || undefined);
 
-      // Get wallet's requests
-      const walletRequests = queueManager.getWalletRequests(tokenId, walletAddress);
+      if (!isValidArkadeAddress(String(walletAddress))) {
+        return res.status(400).json({ error: 'Invalid walletAddress' });
+      }
 
-      // Get queue positions for each request
-      const requestsWithPositions = walletRequests.map(request => ({
-        ...request,
-        queuePosition: queueManager.getQueuePosition(tokenId, request.id)
-      }));
+      // DB-authoritative view (important on Render/multi-instance)
+      const walletRequestsDb = await prisma.purchaseRequest.findMany({
+        where: {
+          tokenId,
+          walletAddress,
+          status: 'pending'
+        },
+        orderBy: [{ submittedAt: 'asc' }, { id: 'asc' }]
+      });
 
-      // Get total pending count
-      const totalPending = queueManager.getTotalPendingCount();
+      const requestsWithPositions = await Promise.all(
+        walletRequestsDb.map(async (r) => {
+          const rows = await prisma.$queryRaw<Array<{ position: number }>>`
+            SELECT COUNT(*)::int AS "position"
+            FROM "purchase_requests"
+            WHERE "tokenId" = ${tokenId}
+              AND "status" = 'pending'
+              AND (
+                "submittedAt" < ${r.submittedAt}
+                OR ("submittedAt" = ${r.submittedAt} AND "id" <= ${r.id})
+              )
+          `;
+
+          return {
+            id: r.id,
+            tokenId: r.tokenId,
+            walletAddress: r.walletAddress,
+            batchesPurchased: r.batchesPurchased,
+            totalPaid: r.totalPaid,
+            txid: r.txid,
+            timestamp: Number(r.timestamp),
+            submittedAt: r.submittedAt,
+            status: r.status,
+            paymentStatus: r.paymentStatus,
+            paymentRequestedAt: r.paymentRequestedAt,
+            roundNumber: r.roundNumber,
+            rejectionReason: r.rejectionReason,
+            queuePosition: rows?.[0]?.position ?? 0
+          };
+        })
+      );
+
+      const totalPending = await prisma.purchaseRequest.count({
+        where: { tokenId, status: 'pending' }
+      });
 
       logger.info({
         tokenId,
         walletAddress: walletAddress.slice(0, 20) + '...',
-        requestCount: walletRequests.length,
+        requestCount: requestsWithPositions.length,
         totalPending
       }, '📊 Queue status requested');
 
       res.json({
         requests: requestsWithPositions,
         totalPending,
-        message: walletRequests.length === 0 
+        message: requestsWithPositions.length === 0 
           ? 'No pending requests' 
-          : `You have ${walletRequests.length} pending request(s)`
+          : `You have ${requestsWithPositions.length} pending request(s)`
       });
 
     } catch (error: any) {
@@ -2068,12 +2144,31 @@ export function createApiServer() {
     try {
       const { tokenId } = req.params;
 
-      // Import queue manager dynamically
-      const { queueManager } = await import('../queue/queueManager');
+      // On-demand cleanup + promotion (no background loops)
+      const { roundProcessor } = await import('../queue/roundProcessor');
+      await roundProcessor.processPaymentTimeouts(globalIO || undefined, tokenId);
+      await roundProcessor.processSupplyCheckRound(tokenId, globalIO || undefined);
 
-      const stats = queueManager.getQueueStats(tokenId);
+      const pending = await prisma.purchaseRequest.findMany({
+        where: { tokenId, status: 'pending' },
+        select: { timestamp: true }
+      });
 
-      res.json(stats);
+      const processingCount = await prisma.purchaseRequest.count({
+        where: { tokenId, status: 'processing' }
+      });
+
+      const timestamps = pending.map((r) => Number(r.timestamp));
+      const oldestRequestTimestamp = timestamps.length > 0 ? Math.min(...timestamps) : null;
+      const newestRequestTimestamp = timestamps.length > 0 ? Math.max(...timestamps) : null;
+
+      res.json({
+        tokenId,
+        totalPending: pending.length,
+        totalProcessing: processingCount,
+        oldestRequestTimestamp,
+        newestRequestTimestamp
+      });
 
     } catch (error: any) {
       logger.error({ error: error.message }, 'Error fetching queue stats');
@@ -2094,16 +2189,11 @@ export function createApiServer() {
     try {
       const { tokenId } = req.params;
 
-      // Import round timer and processor dynamically
-      const { roundTimer } = await import('../queue/roundTimer');
-      const { roundProcessor } = await import('../queue/roundProcessor');
-
-      const roundInfo = roundTimer.getRoundInfo(tokenId);
-      const currentRound = roundProcessor.getCurrentRound();
+      void tokenId;
 
       res.json({
-        ...roundInfo,
-        currentRound
+        active: false,
+        message: 'Rounds are disabled; presale processing is on-demand.'
       });
 
     } catch (error: any) {
