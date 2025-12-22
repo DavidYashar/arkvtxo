@@ -10,7 +10,7 @@
  * USAGE:
  * 1. Set enabled = true for first token (controlled launch)
  * 2. Add your Arkade wallet addresses to PRESALE_POOL_WALLETS array
- * 3. Adjust WALLET_THRESHOLD_SATS if needed (default: 20,000 sats)
+ * 3. Adjust WALLET_THRESHOLD_SATS if needed
  * 4. After public launch, set enabled = false
  */
 
@@ -23,19 +23,19 @@ export const PRESALE_POOL_CONFIG = {
   enabled: true,  // Set to false for public launch (direct to creator)
   
   // Threshold in sats - when wallet reaches this, mark as full and rotate
-  WALLET_THRESHOLD_SATS: 4000,
+  WALLET_THRESHOLD_SATS: 3000000,
   
   // Background monitor interval - check wallet balances every X milliseconds
   MONITOR_INTERVAL_MS: 60_000, // 60 seconds (configurable)
 };
 
 //calculations
-// each wallet can handle up to 2,100,000 sats (0.021 BTC) before rotating
-// with 20 wallets, total capacity is 42,000,000 sats (0.42 BTC)
+// each wallet can handle up to 3,000,000 sats (0.03 BTC) before rotating
+// with 20 wallets, total capacity is 60,000,000 sats (0.60 BTC)
 //total token supply of VTXO is 21,000,000 
 // each purchase is 2000 sats for 1000 VTXO tokens
-// so each wallet can get 1050 purchases before rotation
-// total number of purchases will be 21000 
+// so each wallet can get 1500 purchases before rotation
+// total number of purchases for full supply will be 21000
 
 // ============================================================================
 // POOL WALLETS
