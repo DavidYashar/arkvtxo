@@ -31,11 +31,16 @@ async function main() {
     logger.info(`   GET  /api/asp/vtxos/:address - Get VTXOs for address`);
     logger.info(`   GET  /api/asp/vtxo-chain/:txid/:vout - VTXO chain info`);
     logger.info(`\n🔐 ASP SDK Endpoints (POST with privateKey):`);
-    logger.info(`   POST /api/asp/sdk/vtxos - Get wallet VTXOs`);
-    logger.info(`   POST /api/asp/sdk/balance - Get wallet balance`);
-    logger.info(`   POST /api/asp/sdk/history - Get wallet history`);
-    logger.info(`   POST /api/asp/sdk/address - Derive address`);
-    logger.info(`   POST /api/asp/sdk/verify-vtxo - Verify VTXO in wallet`);
+    if (process.env.ALLOW_UNSAFE_PRIVATE_KEY_API === 'true') {
+      logger.warn('Unsafe SDK helper endpoints are ENABLED (server will accept private keys).');
+      logger.info(`   POST /api/asp/sdk/vtxos - Get wallet VTXOs`);
+      logger.info(`   POST /api/asp/sdk/balance - Get wallet balance`);
+      logger.info(`   POST /api/asp/sdk/history - Get wallet history`);
+      logger.info(`   POST /api/asp/sdk/address - Derive address`);
+      logger.info(`   POST /api/asp/sdk/verify-vtxo - Verify VTXO in wallet`);
+    } else {
+      logger.info('Unsafe SDK helper endpoints are DISABLED (ALLOW_UNSAFE_PRIVATE_KEY_API != true).');
+    }
     logger.info(`\n🎯 Round-Based Purchase Endpoints:`);
     logger.info(`   POST /api/presale/round-purchase - Submit purchase to queue`);
     logger.info(`   GET  /api/presale/queue-status/:tokenId/:wallet - Get queue status`);

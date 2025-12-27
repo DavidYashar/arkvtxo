@@ -58,56 +58,8 @@ export function getIO(): SocketIOServer | null {
  * Setup WebSocket connection handling
  */
 function setupWebSocket(io: SocketIOServer) {
-  // WebSocket Authentication Middleware
-  io.use((socket, next) => {
-    const token = socket.handshake.auth.token;
-    const expectedToken = process.env.API_KEY;
-
-    // If no API_KEY configured, allow (backward compatibility / local dev)
-    if (!expectedToken) {
-      logger.warn('⚠️  API_KEY not configured - WebSocket authentication disabled');
-      return next();
-    }
-
-    // Verify token
-    if (!token) {
-      logger.warn(
-        {
-          socketId: socket.id,
-          origin: socket.handshake.headers?.origin,
-          hasToken: false,
-          expectedTokenLength: expectedToken.length,
-        },
-        '❌ WebSocket connection without auth token'
-      );
-      return next(new Error('Unauthorized - Missing token'));
-    }
-
-    if (token !== expectedToken) {
-      logger.warn(
-        {
-          socketId: socket.id,
-          hasToken: !!token,
-          tokenLength: token.length,
-          expectedTokenLength: expectedToken.length,
-          origin: socket.handshake.headers?.origin,
-        },
-        '❌ Unauthorized WebSocket connection attempt - invalid token'
-      );
-      return next(new Error('Unauthorized - Invalid token'));
-    }
-
-    logger.info(
-      {
-        socketId: socket.id,
-        origin: socket.handshake.headers?.origin,
-        tokenLength: token.length,
-        expectedTokenLength: expectedToken.length,
-      },
-      '✅ WebSocket authenticated'
-    );
-    next();
-  });
+  // WebSocket auth intentionally disabled.
+  // Browser-exposed "API keys" are not secrets; enforce privileged actions via HTTP write auth.
 
   io.on('connection', (socket) => {
     logger.info({ socketId: socket.id }, '🔌 WebSocket client connected');
@@ -208,32 +160,46 @@ export function createApiServer() {
   // Body parsing with size limit
   app.use(express.json({ limit: '10kb' }));
 
-  // API Key Authentication Middleware
-  const apiKeyAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  // Write authentication (keeps GET reads public)
+  // - Prefer INTERNAL_API_KEY for server-to-server (BFF) calls.
+  // - Support INDEXER_INTERNAL_KEY as an alias (backward compatibility).
+  // - Optionally allow legacy API_KEY as a fallback.
+  const writeAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
     // Skip auth for health check
     if (req.path === '/health') {
       return next();
     }
 
-    const apiKey = req.headers['x-api-key'] as string;
-    const expectedKey = process.env.API_KEY;
-
-    // If API_KEY not configured, allow (backward compatibility)
-    if (!expectedKey) {
-      logger.warn('⚠️  API_KEY not configured - authentication disabled');
+    // Public reads
+    if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
       return next();
     }
 
-    if (!apiKey || apiKey !== expectedKey) {
-      logger.warn({ path: req.path, ip: req.ip }, 'Unauthorized API access attempt');
-      return res.status(401).json({ error: 'Unauthorized - Invalid API key' });
+    const expectedInternalKey = process.env.INTERNAL_API_KEY || process.env.INDEXER_INTERNAL_KEY;
+    const internalKey = (req.headers['x-internal-key'] as string | undefined) || '';
+    if (expectedInternalKey && internalKey === expectedInternalKey) {
+      return next();
     }
 
-    next();
+    const expectedApiKey = process.env.API_KEY;
+    const apiKey = (req.headers['x-api-key'] as string | undefined) || '';
+
+    // If neither key is configured, allow (backward compatibility)
+    if (!expectedInternalKey && !expectedApiKey) {
+      logger.warn('⚠️  INTERNAL_API_KEY/API_KEY not configured - write authentication disabled');
+      return next();
+    }
+
+    if (expectedApiKey && apiKey === expectedApiKey) {
+      return next();
+    }
+
+    logger.warn({ path: req.path, ip: req.ip, method: req.method }, 'Unauthorized write API access attempt');
+    return res.status(401).json({ error: 'Unauthorized' });
   };
 
-  // Apply API key auth to all /api routes
-  app.use('/api', apiKeyAuth);
+  // Apply write auth to all /api routes (GET remains public)
+  app.use('/api', writeAuth);
 
   // Mount verification router
   app.use('/api', verifyTokenRouter);
@@ -1039,6 +1005,12 @@ export function createApiServer() {
   // Get all VTXOs for a wallet
   app.post('/api/asp/sdk/vtxos', async (req, res) => {
     try {
+      if (process.env.ALLOW_UNSAFE_PRIVATE_KEY_API !== 'true') {
+        return res.status(410).json({
+          success: false,
+          error: 'This endpoint is disabled (unsafe: would handle private keys on the server).',
+        });
+      }
       const { privateKey } = req.body;
       
       if (!privateKey) {
@@ -1062,6 +1034,12 @@ export function createApiServer() {
   // Get balance for a wallet
   app.post('/api/asp/sdk/balance', async (req, res) => {
     try {
+      if (process.env.ALLOW_UNSAFE_PRIVATE_KEY_API !== 'true') {
+        return res.status(410).json({
+          success: false,
+          error: 'This endpoint is disabled (unsafe: would handle private keys on the server).',
+        });
+      }
       const { privateKey } = req.body;
       
       if (!privateKey) {
@@ -1085,6 +1063,12 @@ export function createApiServer() {
   // Get transaction history for a wallet
   app.post('/api/asp/sdk/history', async (req, res) => {
     try {
+      if (process.env.ALLOW_UNSAFE_PRIVATE_KEY_API !== 'true') {
+        return res.status(410).json({
+          success: false,
+          error: 'This endpoint is disabled (unsafe: would handle private keys on the server).',
+        });
+      }
       const { privateKey } = req.body;
       
       if (!privateKey) {
@@ -1108,6 +1092,12 @@ export function createApiServer() {
   // Get Arkade address from private key
   app.post('/api/asp/sdk/address', async (req, res) => {
     try {
+      if (process.env.ALLOW_UNSAFE_PRIVATE_KEY_API !== 'true') {
+        return res.status(410).json({
+          success: false,
+          error: 'This endpoint is disabled (unsafe: would handle private keys on the server).',
+        });
+      }
       const { privateKey } = req.body;
       
       if (!privateKey) {
@@ -1131,6 +1121,12 @@ export function createApiServer() {
   // Verify if specific VTXO exists in a wallet
   app.post('/api/asp/sdk/verify-vtxo', async (req, res) => {
     try {
+      if (process.env.ALLOW_UNSAFE_PRIVATE_KEY_API !== 'true') {
+        return res.status(410).json({
+          success: false,
+          error: 'This endpoint is disabled (unsafe: would handle private keys on the server).',
+        });
+      }
       const { privateKey, vtxoId } = req.body;
       
       if (!privateKey || !vtxoId) {
@@ -1794,15 +1790,73 @@ export function createApiServer() {
    */
   app.post('/api/presale/round-purchase', async (req, res) => {
     try {
+      const idempotencyKey = (req.headers['idempotency-key'] as string | undefined) || '';
       const { tokenId, walletAddress, batchesPurchased, totalPaid } = req.body;
+
+      const idempotencyRoute = 'presale/round-purchase';
+      const idempotencyScope = `${String(tokenId || '')}:${String(walletAddress || '')}`;
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+
+      const respond = async (status: number, body: any) => {
+        if (idempotencyKey) {
+          try {
+            await prisma.idempotencyKey.update({
+              where: {
+                idempotency_key_route_scope: {
+                  key: idempotencyKey,
+                  route: idempotencyRoute,
+                  scope: idempotencyScope,
+                },
+              },
+              data: {
+                state: 'completed',
+                statusCode: status,
+                response: body,
+                expiresAt,
+              },
+            });
+          } catch {
+            // Best-effort idempotency update; don't block response.
+          }
+        }
+        return res.status(status).json(body);
+      };
+
+      if (idempotencyKey) {
+        const existing = await prisma.idempotencyKey.findUnique({
+          where: {
+            idempotency_key_route_scope: {
+              key: idempotencyKey,
+              route: idempotencyRoute,
+              scope: idempotencyScope,
+            },
+          },
+        });
+
+        if (existing) {
+          if (existing.state === 'completed') {
+            return res.status(existing.statusCode ?? 200).json(existing.response ?? {});
+          }
+          return res.status(409).json({ error: 'Request already in progress. Retry with same Idempotency-Key.' });
+        }
+
+        await prisma.idempotencyKey.create({
+          data: {
+            key: idempotencyKey,
+            route: idempotencyRoute,
+            scope: idempotencyScope,
+            expiresAt,
+          },
+        });
+      }
 
       // Validate required fields (NO TXID REQUIRED - payment happens later!)
       if (!tokenId || !walletAddress || !batchesPurchased || !totalPaid) {
-        return res.status(400).json({ error: 'Missing required fields' });
+        return await respond(400, { error: 'Missing required fields' });
       }
 
       if (!isValidArkadeAddress(String(walletAddress))) {
-        return res.status(400).json({ error: 'Invalid walletAddress' });
+        return await respond(400, { error: 'Invalid walletAddress' });
       }
 
       // Validate token exists and is presale
@@ -1811,7 +1865,7 @@ export function createApiServer() {
       });
 
       if (!token || !token.isPresale) {
-        return res.status(404).json({ error: 'Pre-sale token not found' });
+        return await respond(404, { error: 'Pre-sale token not found' });
       }
 
       logger.info({ 
@@ -1877,16 +1931,18 @@ export function createApiServer() {
         estimatedWaitSeconds
       }, '✅ Request added to queue');
 
-      res.json({
+      const responseBody = {
         requestId: created.id,
         queuePosition,
         estimatedWaitSeconds,
         message: `Request queued. Position: ${queuePosition}. Estimated wait: ${estimatedWaitSeconds}s.`
-      });
+      };
+
+      return await respond(200, responseBody);
 
     } catch (error: any) {
       logger.error({ error: error.message, stack: error.stack }, 'Error submitting round purchase');
-      res.status(500).json({ error: 'Internal server error' });
+      return res.status(500).json({ error: 'Internal server error' });
     }
   });
 
@@ -1904,11 +1960,69 @@ export function createApiServer() {
    */
   app.post('/api/presale/submit-payment', async (req, res) => {
     try {
+      const idempotencyKey = (req.headers['idempotency-key'] as string | undefined) || '';
       const { requestId, txid } = req.body;
+
+      const idempotencyRoute = 'presale/submit-payment';
+      const idempotencyScope = String(requestId || '');
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+
+      const respond = async (status: number, body: any) => {
+        if (idempotencyKey) {
+          try {
+            await prisma.idempotencyKey.update({
+              where: {
+                idempotency_key_route_scope: {
+                  key: idempotencyKey,
+                  route: idempotencyRoute,
+                  scope: idempotencyScope,
+                },
+              },
+              data: {
+                state: 'completed',
+                statusCode: status,
+                response: body,
+                expiresAt,
+              },
+            });
+          } catch {
+            // Best-effort idempotency update
+          }
+        }
+        return res.status(status).json(body);
+      };
+
+      if (idempotencyKey) {
+        const existing = await prisma.idempotencyKey.findUnique({
+          where: {
+            idempotency_key_route_scope: {
+              key: idempotencyKey,
+              route: idempotencyRoute,
+              scope: idempotencyScope,
+            },
+          },
+        });
+
+        if (existing) {
+          if (existing.state === 'completed') {
+            return res.status(existing.statusCode ?? 200).json(existing.response ?? {});
+          }
+          return res.status(409).json({ error: 'Request already in progress. Retry with same Idempotency-Key.' });
+        }
+
+        await prisma.idempotencyKey.create({
+          data: {
+            key: idempotencyKey,
+            route: idempotencyRoute,
+            scope: idempotencyScope,
+            expiresAt,
+          },
+        });
+      }
 
       // Validate required fields
       if (!requestId || !txid) {
-        return res.status(400).json({ 
+        return await respond(400, {
           error: 'Missing required fields: requestId and txid' 
         });
       }
@@ -1930,7 +2044,7 @@ export function createApiServer() {
 
       if (!updated) {
         logger.warn({ requestId }, '⚠️ Request not found or expired');
-        return res.status(404).json({ 
+        return await respond(404, {
           error: 'Request not found or payment window expired' 
         });
       }
@@ -1939,14 +2053,14 @@ export function createApiServer() {
       const result = await roundProcessor.verifyAndFinalizeSingleRequest(requestId, globalIO || undefined);
 
       if (result.status === 'confirmed') {
-        return res.json({
+        return await respond(200, {
           success: true,
           status: 'confirmed',
           message: 'Payment verified and purchase confirmed.'
         });
       }
 
-      return res.json({
+      return await respond(200, {
         success: true,
         status: 'pending',
         message: 'Payment recorded. Verification pending; retry shortly if not confirmed.'
@@ -1975,11 +2089,69 @@ export function createApiServer() {
    */
   app.post('/api/presale/cancel-payment', async (req, res) => {
     try {
+      const idempotencyKey = (req.headers['idempotency-key'] as string | undefined) || '';
       const { requestId } = req.body;
+
+      const idempotencyRoute = 'presale/cancel-payment';
+      const idempotencyScope = String(requestId || '');
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+
+      const respond = async (status: number, body: any) => {
+        if (idempotencyKey) {
+          try {
+            await prisma.idempotencyKey.update({
+              where: {
+                idempotency_key_route_scope: {
+                  key: idempotencyKey,
+                  route: idempotencyRoute,
+                  scope: idempotencyScope,
+                },
+              },
+              data: {
+                state: 'completed',
+                statusCode: status,
+                response: body,
+                expiresAt,
+              },
+            });
+          } catch {
+            // Best-effort idempotency update
+          }
+        }
+        return res.status(status).json(body);
+      };
+
+      if (idempotencyKey) {
+        const existing = await prisma.idempotencyKey.findUnique({
+          where: {
+            idempotency_key_route_scope: {
+              key: idempotencyKey,
+              route: idempotencyRoute,
+              scope: idempotencyScope,
+            },
+          },
+        });
+
+        if (existing) {
+          if (existing.state === 'completed') {
+            return res.status(existing.statusCode ?? 200).json(existing.response ?? {});
+          }
+          return res.status(409).json({ error: 'Request already in progress. Retry with same Idempotency-Key.' });
+        }
+
+        await prisma.idempotencyKey.create({
+          data: {
+            key: idempotencyKey,
+            route: idempotencyRoute,
+            scope: idempotencyScope,
+            expiresAt,
+          },
+        });
+      }
 
       // Validate required fields
       if (!requestId) {
-        return res.status(400).json({ 
+        return await respond(400, {
           error: 'Missing required field: requestId' 
         });
       }
@@ -1997,7 +2169,7 @@ export function createApiServer() {
 
       if (!request) {
         logger.warn({ requestId }, '⚠️ Request not found');
-        return res.status(404).json({ 
+        return await respond(404, {
           error: 'Request not found' 
         });
       }
@@ -2007,7 +2179,7 @@ export function createApiServer() {
           requestId, 
           currentStatus: request.paymentStatus 
         }, '⚠️ Request not in payment-requested state');
-        return res.status(400).json({ 
+        return await respond(400, {
           error: `Cannot cancel request in ${request.paymentStatus} state` 
         });
       }
@@ -2027,7 +2199,7 @@ export function createApiServer() {
 
       logger.info({ requestId }, '✅ Payment request canceled and supply freed');
 
-      res.json({ 
+      return await respond(200, {
         success: true, 
         message: 'Payment request canceled successfully. Supply has been freed.' 
       });

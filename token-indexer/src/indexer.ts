@@ -27,8 +27,8 @@ export class TokenIndexer {
     logger.info('Starting token indexer...');
     this.isRunning = true;
 
-    // TODO: Subscribe to Arkade indexer for new transactions
-    // For now, we'll implement polling
+    // TODO: Subscribe to Arkade indexer for new transactions (preferred).
+    // For now, we keep a polling loop for development against a compatible REST indexer.
     await this.pollTransactions();
   }
 
@@ -44,31 +44,71 @@ export class TokenIndexer {
    * Poll for new transactions (temporary until websocket subscription)
    */
   private async pollTransactions() {
+    let hasReportedUnsupportedEndpoint = false;
+
     while (this.isRunning) {
       try {
         // Query Arkade indexer for recent commitment transactions
         // This is a placeholder - actual implementation depends on Arkade indexer API
         
         // Skip if no Arkade indexer URL configured
-        if (!this.arkadeIndexerUrl || this.arkadeIndexerUrl.includes('localhost')) {
-          logger.warn('Arkade indexer URL not configured or using default. Waiting...');
+        if (!this.arkadeIndexerUrl) {
+          logger.warn('Arkade indexer URL not configured. Waiting...');
           await this.sleep(30000); // Wait 30 seconds
           continue;
         }
         
-        const response = await fetch(`${this.arkadeIndexerUrl}/api/transactions?limit=100`, {
-          headers: { 'Accept': 'application/json' },
-        });
-        
+        const candidates = [
+          // Some deployments may expose a REST list endpoint under /v1/indexer.
+          `${this.arkadeIndexerUrl}/v1/indexer/transactions?limit=100`,
+          // Legacy / custom indexers.
+          `${this.arkadeIndexerUrl}/api/transactions?limit=100`,
+        ];
+
+        let response: Response | null = null;
+        let urlUsed = '';
+        for (const candidate of candidates) {
+          urlUsed = candidate;
+          response = await fetch(candidate, { headers: { Accept: 'application/json' } });
+          // If the endpoint is not found, try next candidate.
+          if (response.status === 404) continue;
+          break;
+        }
+
+        if (!response) {
+          // Should never happen, but fail safe.
+          await this.sleep(30000);
+          continue;
+        }
+
+        if (response.status === 404) {
+          if (!hasReportedUnsupportedEndpoint) {
+            logger.warn(
+              {
+                baseUrl: this.arkadeIndexerUrl,
+                tried: candidates,
+              },
+              'No compatible REST transaction listing endpoint found; chain polling is currently unsupported and will be paused.'
+            );
+            hasReportedUnsupportedEndpoint = true;
+          }
+
+          // Stop the polling loop to avoid endless noisy warnings.
+          this.isRunning = false;
+          break;
+        }
+
         if (!response.ok) {
-          logger.warn({ status: response.status, url: this.arkadeIndexerUrl }, 
-            'Failed to fetch transactions from Arkade indexer - is it running?');
+          logger.warn(
+            { status: response.status, url: urlUsed },
+            'Failed to fetch transactions from Arkade indexer - is it running?'
+          );
           await this.sleep(30000); // Wait 30 seconds before retry
           continue;
         }
 
-        const data = await response.json() as any;
-        const transactions = data.transactions || [];
+        const data = (await response.json()) as any;
+        const transactions = data.transactions || data.txs || data.items || [];
         
         if (transactions.length > 0) {
           logger.info({ count: transactions.length }, 'Processing transactions');

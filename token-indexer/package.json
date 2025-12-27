@@ -6,6 +6,8 @@
   "scripts": {
     "build": "prisma generate && tsc",
     "dev": "tsx watch src/index.ts",
+    "decode:virtualtx": "tsx src/scripts/decodeVirtualTx.ts",
+    "trace:send": "tsx src/scripts/traceSend.ts",
     "start": "node dist/index.js",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
